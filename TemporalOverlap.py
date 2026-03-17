@@ -111,13 +111,3 @@ def extract_window_features(windows, feature_func=None):
     
     return features_df
 
-
-# Example usage
-if __name__ == "__main__":
-    # Load your preprocessed data
-    # results from previous script
-    # hbo_data = pd.read_csv('hbo_concentrations.csv', index_col=0)
-    
-    # Parameters - FILL THESE IN
-    WINDOW_SEC = 30      # YOUR VALUE: ______ seconds
-    OVER
