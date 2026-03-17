@@ -614,53 +614,6 @@ class NIRSPreprocessor:
         return results
 
 
-# Example usage
-if __name__ == "__main__":
-    # Create preprocessor with your parameters
-    # FILL IN YOUR VALUES HERE
-    pre = NIRSPreprocessor(
-        # System
-        fs=10.2,              # YOUR VALUE: ______ Hz
-        wavelengths=[730, 850], # YOUR VALUE: ______ nm
-        source_detector_dist=30, # YOUR VALUE: ______ mm
-        
-        # Quality
-        intensity_threshold=0.05,  # YOUR VALUE: ______
-        impedance_threshold=5,      # YOUR VALUE: ______ kOhm
-        baseline_sec=30,            # YOUR VALUE: ______ s
-        
-        # Filtering
-        lowcut=0.01,    # YOUR VALUE: ______ Hz
-        highcut=0.5,    # YOUR VALUE: ______ Hz
-        filter_order=3, # YOUR VALUE: ______
-        
-        # Wavelet
-        wavelet='db4',              # YOUR VALUE: ______
-        wavelet_level=4,            # YOUR VALUE: ______
-        wavelet_threshold_factor=2.5, # YOUR VALUE: ______
-        
-        # Spline
-        artifact_std_threshold=3.0, # YOUR VALUE: ______
-        spline_smoothing=0,          # YOUR VALUE: ______
-        
-        # Kalman
-        kalman_Q=1e-4,          # YOUR VALUE: ______
-        kalman_R=0.01,          # YOUR VALUE: ______
-        kalman_model_order=2,    # YOUR VALUE: ______
-        kalman_P_init=1.0,       # YOUR VALUE: ______
-        
-        # Beer-Lambert
-        dpf_730=5.0,   # YOUR VALUE: ______ (VERIFY!)
-        dpf_850=4.5,   # YOUR VALUE: ______ (VERIFY!)
-        
-        verbose=True
-    )
-    
-    # Load your data (adapt to your format)
-    # raw_data = pd.read_csv('your_nirs_data.csv')
-    # impedance = pd.read_csv('impedance.csv')
-    
-    # Run pipeline
     # results = pre.preprocess_pipeline(raw_data, impedance)
     
     print("\nScript ready. Uncomment and adapt the data loading lines above.")
