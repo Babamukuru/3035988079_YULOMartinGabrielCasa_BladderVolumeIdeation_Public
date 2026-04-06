@@ -1,0 +1,88 @@
+---
+title: "ultrasound_validation"
+output: html_document
+date: "2026-04-05"
+---
+
+```{r setup, include=FALSE}
+# Command line argument handling
+#args <- commandArgs(trailingOnly = TRUE)
+
+# Check if input file is provided
+#if (length(args) == 0) {
+  #stop("Please provide an input file: Rscript ultrasound_validation.R input.csv")
+#}
+
+#input_file <- args[1]
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+# Load required libraries
+library(dplyr)
+
+library(openxlsx)
+df <- read.xlsx("BladderFYP_Ultrasound_Validation_processed.xlsx")
+```
+
+
+
+```{r, echo=FALSE}
+BladderVolume <- function(depth, width, height) {
+  # Calculate volume in mm^3
+  volume_est <- depth * width * height * 0.72
+  # Convert to ml (from mm^3)
+  volume_est <- volume_est / 1000
+  return(volume_est)
+}
+```
+
+
+```{r}
+Volumes <- vector("numeric", length = nrow(df))
+
+for (i in 1:nrow(df)) {
+  Volumes[i] <- BladderVolume(df$'D(scaled)'[i], df$'W(scaled)'[i], df$'H(scaled)'[i])
+}
+```
+
+```{r}
+# Add volumes to dataframe
+df_volumed <- df %>% mutate(Volume_ml = Volumes)
+
+# Different filtering versions (commented out for now)
+# Keep all data (including missing/poor quality)
+df_volumed_noNA <- df_volumed %>% filter(Label == 1 | Label == 2)
+
+# Keep only good quality images
+df_volumed_good <- df_volumed %>% filter(Label == 2)
+```
+
+
+```{r}
+# For now, using the complete dataset
+df_final <- df_volumed
+
+# Create output filename
+output_file <- gsub("\\.csv$", "_volumed.csv", "BladderFYP_Ultrasound_Validation_processed.csv")
+
+
+# Write to CSV
+write.csv(df_final, output_file, row.names = FALSE)
+
+# Print confirmation
+cat("Processing complete!\n")
+#cat("Input file:", input_file, "\n")
+cat("Output file:", output_file, "\n")
+cat("Total rows processed:", nrow(df_final), "\n")
+```
+
+
+```{r}
+
+```
