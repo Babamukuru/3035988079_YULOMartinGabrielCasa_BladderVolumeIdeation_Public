@@ -94,6 +94,19 @@ tail -n +2 "$input_file" | while IFS=',' read -r patient_id folder us1 us2 bv1 u
         echo ">>> Completed $csv_name"
         
     done
+        # ============================================
+        # SCRIPT 6: Model
+        # ============================================
+    bv6="NA" #Quick-fix for earlier error
+    
+    echo "  [6/6] Running Sixth Script..."
+    python3 MLmodel.py  "Feature_Extracted_y/optics_data_${csv1}_part1.cleaned_windows_features.csv" \\
+    "Feature_Extracted_y/optics_data_${csv2}_part1.cleaned_windows_features.csv" "Feature_Extracted_y/optics_data_${csv3}_part1.cleaned_windows_features.csv" \\
+    "Feature_Extracted_y/optics_data_${csv4}_part1.cleaned_windows_features.csv" $bv1 $bv3 $bv4 $bv5 $bv6 $pvr
+    echo "  ✓ Model training complete"
+    
+    echo ""
+    echo "✓ Patient $patient_id complete"
     
     echo ""
     echo "✓ Patient $patient_id complete"
