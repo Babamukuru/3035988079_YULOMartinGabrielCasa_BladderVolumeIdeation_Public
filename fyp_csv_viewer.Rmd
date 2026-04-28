@@ -1,0 +1,59 @@
+---
+title: "fyp csv viewer"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+
+R notebook to easily view csvs, including row and col names and numbers, file sizes, and information, as it is easier than opening in excel or textedit. Purely a helper script for convenience and double-checking, not needed for main pipeline.
+
+```{r}
+filepath<-"Feature_Extracted/"
+filename<-"optics_data_2026-03-25_11-56-24_part1.cleaned_windows_features.csv"
+input_file<-paste0(filepath, filename)
+df<-read.csv(input_file)
+```
+
+Possible file paths:
+Data/SensorDataRd1/
+Archive_n/
+
+Preprocessed_Data/
+
+TO_Data/
+
+Feature_Extracted/
+
+Feature_Extracted_y/
+
+```{r}
+print(nrow(df))
+print(ncol(df))
+
+```
+
+
+```{r}
+print(colnames(df))
+
+```
+
+
+```{r}
+head(df)
+```
+
+
+```{r}
+mastercsv<-read.csv("BladderVolFYP_MasterDataset_First8.csv")
+print(mastercsv)
+```
+
+
+```{r}
+
+```
+
