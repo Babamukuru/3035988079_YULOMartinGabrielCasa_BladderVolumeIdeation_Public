@@ -36,7 +36,7 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import ConfusionMatrixDisplay
 import joblib
 
-OUTPUT_DIR = 'Trained_Models'
+OUTPUT_DIR = 'Trained_Models_Scikit'
 
 
 # ============================================================
@@ -120,17 +120,6 @@ def build_session_list(args):
 # ============================================================
 
 def load_and_prepare_data(session_list):
-    """
-    Load feature CSVs and prepare X (features) and y (labels).
-    Uses linear ramp labeling between pre and post volumes.
-    
-    Returns:
-        X_all : np.array - all feature data stacked
-        y_all : np.array - all labels stacked
-        groups : np.array - session identifier for each row (for LOSO CV)
-        feature_names : list - column names of features used
-        session_info : list of dicts - metadata per session
-    """
     X_list, y_list, groups_list = [], [], []
     session_info = []
     feature_names = None
@@ -140,10 +129,15 @@ def load_and_prepare_data(session_list):
             print(f"  Warning: {path} not found. Skipping {name}.")
             continue
         
+        # Skip if volumes are NaN
+        if pd.isna(pre_vol) or pd.isna(post_vol):
+            print(f"  Skipping {name}: NaN volume")
+            continue
+        
         df = pd.read_csv(path)
         print(f"  {name}: {len(df)} rows, pre={pre_vol}mL, post={post_vol}mL")
         
-        # Identify feature columns (exclude metadata columns)
+        # Identify feature columns
         exclude_cols = ['window_id', 'prediction_time_sec', 'timestamp_dt',
                        'elapsed_time_sec', 'elapsed_time_min',
                        'Bladder_Filling_Index', 'Bladder_Filling_Index_Smooth',
@@ -157,8 +151,18 @@ def load_and_prepare_data(session_list):
         if feature_names is None:
             feature_names = feature_cols
         else:
-            # Use intersection of features across sessions
             feature_names = [f for f in feature_names if f in feature_cols]
+        
+        # --- FORWARD FILL NaN in features ---
+        df[feature_names] = df[feature_names].fillna(method='ffill')
+        df[feature_names] = df[feature_names].fillna(method='bfill')  # handle NaN at start
+        
+        # Drop any rows still NaN (should be none after ffill+bfill)
+        before = len(df)
+        df = df.dropna(subset=feature_names)
+        after = len(df)
+        if before > after:
+            print(f"    Dropped {before - after} rows still NaN after forward fill")
         
         # Create linear ramp labels
         n = len(df)
@@ -176,6 +180,9 @@ def load_and_prepare_data(session_list):
             'pre_vol': pre_vol,
             'post_vol': post_vol
         })
+    
+    if not X_list:
+        return None, None, None, None, None
     
     X_all = np.vstack(X_list)
     y_all = np.hstack(y_list)
@@ -272,94 +279,339 @@ def classify_volume(vol, thresholds=(100, 300)):
         return 'moderate'
     else:
         return 'high'
-
-
-def evaluate_results(y_true, y_pred, session_info, model_name, pid):
-    """Print regression and classification metrics."""
     
-    # --- Regression metrics ---
-    print(f"\n{'='*60}")
-    print(f"REGRESSION METRICS — {model_name}")
-    print(f"{'='*60}")
+def plot_predicted_vs_actual(session_info, y_true, y_pred, output_dir, model_name, pid='all'):
+    """
+    Bar chart comparing predicted vs actual bladder volumes per session.
+    Uses endpoint predictions (first and last of each session).
+    """
+    # Collect endpoint data
+    sessions = []
+    actual_pre = []
+    actual_post = []
+    pred_pre = []
+    pred_post = []
     
-    valid_mask = ~np.isnan(y_pred)
-    y_true_valid = y_true[valid_mask]
-    y_pred_valid = y_pred[valid_mask]
-    
-    mae = mean_absolute_error(y_true_valid, y_pred_valid)
-    rmse = np.sqrt(mean_squared_error(y_true_valid, y_pred_valid))
-    r2 = r2_score(y_true_valid, y_pred_valid)
-    
-    print(f"  MAE: {mae:.1f} mL")
-    print(f"  RMSE: {rmse:.1f} mL")
-    print(f"  R²: {r2:.3f}")
-    
-    # --- Endpoint metrics per session ---
-    print(f"\n  Per-session endpoint errors:")
-    start_idx = 0
-    for info in session_info:
-        end_idx = start_idx + info['n_rows']
-        if start_idx < len(y_true):
-            actual_pre = y_true[start_idx]
-            actual_post = y_true[min(end_idx-1, len(y_true)-1)]
-            pred_pre = y_pred[start_idx] if not np.isnan(y_pred[start_idx]) else np.nan
-            pred_post = y_pred[min(end_idx-1, len(y_true)-1)] if not np.isnan(y_pred[min(end_idx-1, len(y_true)-1)]) else np.nan
-            print(f"    {info['name']}: Start err={abs(actual_pre-pred_pre):.1f}mL, "
-                  f"End err={abs(actual_post-pred_post):.1f}mL")
-        start_idx = end_idx
-    
-    # --- Classification metrics (on endpoints only) ---
-    print(f"\n{'='*60}")
-    print(f"CLASSIFICATION METRICS — {model_name}")
-    print(f"  Thresholds: <100 mL = low, 100–300 mL = moderate, >300 mL = high")
-    print(f"{'='*60}")
-    
-    # Get endpoint predictions per session
-    actual_classes = []
-    pred_classes = []
     start_idx = 0
     for info in session_info:
         end_idx = start_idx + info['n_rows']
         if end_idx <= len(y_true):
-            actual_post = y_true[end_idx - 1]
-            pred_post = y_pred[end_idx - 1]
-            if not np.isnan(pred_post):
-                actual_classes.append(classify_volume(actual_post))
-                pred_classes.append(classify_volume(pred_post))
+            ap = y_true[start_idx]
+            a_post = y_true[end_idx - 1]
+            pp = y_pred[start_idx] if not np.isnan(y_pred[start_idx]) else np.nan
+            p_post = y_pred[end_idx - 1] if not np.isnan(y_pred[end_idx - 1]) else np.nan
+            
+            if not np.isnan(pp) and not np.isnan(p_post):
+                label = f"{info['name']}" if pid == 'all' else f"{info['name']}"
+                if 'pid' in info:
+                    label = f"P{info['pid']} {info['name']}"
+                
+                sessions.append(label)
+                actual_pre.append(ap)
+                actual_post.append(a_post)
+                pred_pre.append(pp)
+                pred_post.append(p_post)
         start_idx = end_idx
     
-    if len(actual_classes) >= 3:
-        y_true_cls = np.array(actual_classes)
-        y_pred_cls = np.array(pred_classes)
-        labels = ['low', 'moderate', 'high']
-        
-        acc = accuracy_score(y_true_cls, y_pred_cls)
-        prec = precision_score(y_true_cls, y_pred_cls, average='weighted', zero_division=0)
-        rec  = recall_score(y_true_cls, y_pred_cls, average='weighted', zero_division=0)
-        f1   = f1_score(y_true_cls, y_pred_cls, average='weighted', zero_division=0)
-        
-        print(f"  Accuracy:  {acc:.3f}")
-        print(f"  Precision: {prec:.3f} (weighted)")
-        print(f"  Recall:    {rec:.3f} (weighted)")
-        print(f"  F1-score:  {f1:.3f} (weighted)")
-        
-        # Confusion matrix
-        cm = confusion_matrix(y_true_cls, y_pred_cls, labels=labels)
-        print(f"\n  Confusion Matrix (rows=actual, cols=predicted):")
-        print(f"              low  mod  high")
-        for i, label in enumerate(labels):
-            print(f"    {label:8s}  {cm[i,0]:3d}  {cm[i,1]:3d}  {cm[i,2]:3d}")
-        
-        # Plot confusion matrix
-        fig, ax = plt.subplots(figsize=(5, 4))
-        ConfusionMatrixDisplay(cm, display_labels=labels).plot(ax=ax, cmap='Blues')
-        ax.set_title(f'{model_name} — Confusion Matrix')
-        plt.tight_layout()
-        plt.savefig(os.path.join(OUTPUT_DIR, f'pid{pid}_{model_name}_confusion.png'), 
-                   dpi=120, bbox_inches='tight')
-        plt.close()
+    if not sessions:
+        return None
     
+    # Create figure
+    fig, axes = plt.subplots(1, 2, figsize=(max(10, len(sessions)*0.8), 5))
+    
+    # LEFT: Pre (start) volumes
+    ax = axes[0]
+    x = np.arange(len(sessions))
+    width = 0.35
+    
+    bars1 = ax.bar(x - width/2, actual_pre, width, label='Actual', color='#2196F3', alpha=0.8)
+    bars2 = ax.bar(x + width/2, pred_pre, width, label='Predicted', color='#F44336', alpha=0.8)
+    
+    ax.set_ylabel('Bladder Volume (mL)')
+    ax.set_title('Start Volumes (Pre)')
+    ax.set_xticks(x)
+    ax.set_xticklabels(sessions, rotation=45, ha='right', fontsize=7)
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    # RIGHT: Post (end) volumes
+    ax = axes[1]
+    bars1 = ax.bar(x - width/2, actual_post, width, label='Actual', color='#2196F3', alpha=0.8)
+    bars2 = ax.bar(x + width/2, pred_post, width, label='Predicted', color='#F44336', alpha=0.8)
+    
+    ax.set_ylabel('Bladder Volume (mL)')
+    ax.set_title('End Volumes (Post)')
+    ax.set_xticks(x)
+    ax.set_xticklabels(sessions, rotation=45, ha='right', fontsize=7)
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis='y')
+    
+    plt.suptitle(f'Predicted vs Actual Bladder Volume — {model_name} (PID {pid})', 
+                fontsize=12, fontweight='bold')
+    plt.tight_layout()
+    
+    path = os.path.join(output_dir, f'pid{pid}_{model_name}_pred_vs_actual.png')
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    return path
+
+
+def save_volume_table(session_info, y_true, y_pred, output_dir, model_name, pid='all'):
+    """
+    Save a CSV table of predicted vs actual volumes.
+    """
+    rows = []
+    start_idx = 0
+    
+    for info in session_info:
+        end_idx = start_idx + info['n_rows']
+        if end_idx <= len(y_true):
+            ap = y_true[start_idx]
+            a_post = y_true[end_idx - 1]
+            pp = y_pred[start_idx] if not np.isnan(y_pred[start_idx]) else np.nan
+            p_post = y_pred[end_idx - 1] if not np.isnan(y_pred[end_idx - 1]) else np.nan
+            
+            if not np.isnan(pp) and not np.isnan(p_post):
+                rows.append({
+                    'Patient': info.get('pid', pid),
+                    'Session': info['name'],
+                    'Actual_Pre_mL': round(ap, 1),
+                    'Pred_Pre_mL': round(pp, 1),
+                    'Pre_Error_mL': round(abs(ap - pp), 1),
+                    'Actual_Post_mL': round(a_post, 1),
+                    'Pred_Post_mL': round(p_post, 1),
+                    'Post_Error_mL': round(abs(a_post - p_post), 1),
+                    'Volume_Change_Actual': round(a_post - ap, 1),
+                    'Volume_Change_Pred': round(p_post - pp, 1)
+                })
+        start_idx = end_idx
+    
+    if not rows:
+        return None
+    
+    df = pd.DataFrame(rows)
+    
+    # Save CSV
+    csv_path = os.path.join(output_dir, f'pid{pid}_{model_name}_volume_table.csv')
+    df.to_csv(csv_path, index=False)
+    
+    # Also print as formatted table
+    print(f"\n  {'='*70}")
+    print(f"  PREDICTED vs ACTUAL VOLUMES — {model_name} (PID {pid})")
+    print(f"  {'='*70}")
+    print(f"  {'Session':<20} {'Actual Pre':>10} {'Pred Pre':>10} {'Error':>8}  |  {'Actual Post':>11} {'Pred Post':>11} {'Error':>8}")
+    print(f"  {'-'*20} {'-'*10} {'-'*10} {'-'*8}  |  {'-'*11} {'-'*11} {'-'*8}")
+    
+    total_error = 0
+    n_err = 0
+    for _, row in df.iterrows():
+        label = f"P{row['Patient']} {row['Session']}" if pid == 'all' else row['Session']
+        print(f"  {label:<20} {row['Actual_Pre_mL']:>10.1f} {row['Pred_Pre_mL']:>10.1f} {row['Pre_Error_mL']:>8.1f}  |  {row['Actual_Post_mL']:>11.1f} {row['Pred_Post_mL']:>11.1f} {row['Post_Error_mL']:>8.1f}")
+        total_error += row['Pre_Error_mL'] + row['Post_Error_mL']
+        n_err += 2
+    
+    if n_err > 0:
+        print(f"  {'='*70}")
+        print(f"  Mean absolute error: {total_error/n_err:.1f} mL")
+    
+    return csv_path
+
+
+def evaluate_results(y_true, y_pred, session_info, model_name, pid):
+    """Print regression and classification metrics. Save ROC curve and metrics file."""
+    
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    metrics_file = os.path.join(OUTPUT_DIR, f'pid{pid}_{model_name}_metrics.txt')
+    
+    with open(metrics_file, 'w') as f:
+        f.write(f"{'='*60}\n")
+        f.write(f"EVALUATION METRICS — {model_name}\n")
+        f.write(f"Patient ID: {pid}\n")
+        f.write(f"{'='*60}\n\n")
+        
+        # --- Regression metrics ---
+        header = f"{'='*60}\nREGRESSION METRICS — {model_name}\n{'='*60}"
+        print(header)
+        f.write(header + "\n")
+        
+        valid_mask = ~np.isnan(y_pred)
+        y_true_valid = y_true[valid_mask]
+        y_pred_valid = y_pred[valid_mask]
+        
+        mae = mean_absolute_error(y_true_valid, y_pred_valid)
+        rmse = np.sqrt(mean_squared_error(y_true_valid, y_pred_valid))
+        r2 = r2_score(y_true_valid, y_pred_valid)
+        
+        reg_metrics = (f"  MAE: {mae:.1f} mL\n"
+                      f"  RMSE: {rmse:.1f} mL\n"
+                      f"  R²: {r2:.3f}\n")
+        print(reg_metrics)
+        f.write(reg_metrics + "\n")
+        
+        # --- Per-session endpoint errors ---
+        endpoint_header = "  Per-session endpoint errors:"
+        print(endpoint_header)
+        f.write(endpoint_header + "\n")
+        
+        start_idx = 0
+        endpoint_data = []
+        for info in session_info:
+            end_idx = start_idx + info['n_rows']
+            if start_idx < len(y_true):
+                actual_pre = y_true[start_idx]
+                actual_post = y_true[min(end_idx-1, len(y_true)-1)]
+                pred_pre = y_pred[start_idx] if not np.isnan(y_pred[start_idx]) else np.nan
+                pred_post = y_pred[min(end_idx-1, len(y_true)-1)] if not np.isnan(y_pred[min(end_idx-1, len(y_true)-1)]) else np.nan
+                err_start = abs(actual_pre-pred_pre)
+                err_end = abs(actual_post-pred_post)
+                
+                line = (f"    {info['name']}: "
+                       f"Start err={err_start:.1f}mL, End err={err_end:.1f}mL")
+                print(line)
+                f.write(line + "\n")
+                
+                endpoint_data.append({
+                    'session': info['name'],
+                    'actual_pre': actual_pre,
+                    'actual_post': actual_post,
+                    'pred_pre': pred_pre,
+                    'pred_post': pred_post,
+                    'err_start': err_start,
+                    'err_end': err_end
+                })
+            start_idx = end_idx
+        
+        # Save endpoint CSV
+        pd.DataFrame(endpoint_data).to_csv(
+            os.path.join(OUTPUT_DIR, f'pid{pid}_{model_name}_endpoints.csv'),
+            index=False
+        )
+        
+        # --- Classification metrics ---
+        cls_header = (f"\n{'='*60}\n"
+                     f"CLASSIFICATION METRICS — {model_name}\n"
+                     f"  Thresholds: <50 mL = low, 50–200 mL = moderate, >200 mL = high\n"
+                     f"{'='*60}")
+        print(cls_header)
+        f.write("\n" + cls_header + "\n")
+        
+        # Get endpoint predictions per session
+        actual_classes = []
+        pred_classes = []
+        pred_scores = []  # for ROC
+        actual_binary = []  # for ROC
+        start_idx = 0
+        for info in session_info:
+            end_idx = start_idx + info['n_rows']
+            if end_idx <= len(y_true):
+                actual_post = y_true[end_idx - 1]
+                pred_post = y_pred[end_idx - 1]
+                if not np.isnan(pred_post):
+                    actual_classes.append(classify_volume(actual_post))
+                    pred_classes.append(classify_volume(pred_post))
+                    pred_scores.append(pred_post)
+                    actual_binary.append(1 if actual_post > 300 else 0)  # high vs not-high
+            start_idx = end_idx
+        
+        if len(actual_classes) >= 3:
+            y_true_cls = np.array(actual_classes)
+            y_pred_cls = np.array(pred_classes)
+            labels = ['low', 'moderate', 'high']
+            
+            acc = accuracy_score(y_true_cls, y_pred_cls)
+            prec = precision_score(y_true_cls, y_pred_cls, average='weighted', zero_division=0)
+            rec  = recall_score(y_true_cls, y_pred_cls, average='weighted', zero_division=0)
+            f1score = f1_score(y_true_cls, y_pred_cls, average='weighted', zero_division=0)
+            
+            cls_metrics = (f"  Accuracy:  {acc:.3f}\n"
+                          f"  Precision: {prec:.3f} (weighted)\n"
+                          f"  Recall:    {rec:.3f} (weighted)\n"
+                          f"  F1-score:  {f1score:.3f} (weighted)\n")
+            print(cls_metrics)
+            f.write(cls_metrics)
+            
+            # Confusion matrix
+            cm = confusion_matrix(y_true_cls, y_pred_cls, labels=labels)
+            cm_str = (f"\n  Confusion Matrix (rows=actual, cols=predicted):\n"
+                     f"              low  mod  high\n")
+            for i, label in enumerate(labels):
+                cm_str += f"    {label:8s}  {cm[i,0]:3d}  {cm[i,1]:3d}  {cm[i,2]:3d}\n"
+            print(cm_str)
+            f.write(cm_str)
+            
+            # Plot and save confusion matrix
+            fig, ax = plt.subplots(figsize=(5, 4))
+            ConfusionMatrixDisplay(cm, display_labels=labels).plot(ax=ax, cmap='Blues')
+            ax.set_title(f'{model_name} — Confusion Matrix (PID {pid})')
+            plt.tight_layout()
+            cm_path = os.path.join(OUTPUT_DIR, f'pid{pid}_{model_name}_confusion.png')
+            plt.savefig(cm_path, dpi=120, bbox_inches='tight')
+            plt.close()
+            print(f"  ✓ Confusion matrix saved to: {cm_path}")
+            f.write(f"\n  Confusion matrix saved to: {cm_path}\n")
+            
+            # --- ROC CURVE ---
+            pred_scores = np.array(pred_scores)
+            actual_binary = np.array(actual_binary)
+            
+            if len(np.unique(actual_binary)) >= 2:
+                auc = roc_auc_score(actual_binary, pred_scores)
+                fpr, tpr, thresholds = roc_curve(actual_binary, pred_scores)
+                
+                fig, ax = plt.subplots(figsize=(5, 4))
+                ax.plot(fpr, tpr, 'b-', linewidth=2, label=f'ROC (AUC = {auc:.3f})')
+                ax.plot([0, 1], [0, 1], 'k--', alpha=0.4, label='Random')
+                ax.set_xlabel('False Positive Rate')
+                ax.set_ylabel('True Positive Rate')
+                ax.set_title(f'{model_name} — ROC: High vs Not-High (PID {pid})')
+                ax.legend(loc='lower right')
+                ax.grid(True, alpha=0.3)
+                plt.tight_layout()
+                roc_path = os.path.join(OUTPUT_DIR, f'pid{pid}_{model_name}_roc.png')
+                plt.savefig(roc_path, dpi=120, bbox_inches='tight')
+                plt.close()
+                print(f"  ✓ ROC curve saved to: {roc_path}")
+                
+                roc_metrics = (f"\n  ROC AUC (high vs not-high): {auc:.3f}\n")
+                print(roc_metrics)
+                f.write(roc_metrics)
+                f.write(f"  ROC curve saved to: {roc_path}\n")
+            else:
+                f.write("\n  ROC: Not enough class diversity for ROC curve\n")
+        else:
+            no_cls = "  Not enough classification data for metrics (need ≥3 endpoints)"
+            print(no_cls)
+            f.write(no_cls + "\n")
+
+        vol_plot_path = plot_predicted_vs_actual(
+    session_info, y_true, y_pred, OUTPUT_DIR, model_name, pid
+)
+        if vol_plot_path:
+            f.write(f"\n  Volume comparison plot: {vol_plot_path}\n")
+
+        # Volume table
+        vol_table_path = save_volume_table(
+            session_info, y_true, y_pred, OUTPUT_DIR, model_name, pid
+        )
+        if vol_table_path:
+            f.write(f"  Volume table: {vol_table_path}\n")
+        
+        # Summary footer
+        footer = (f"\n{'='*60}\n"
+                 f"SUMMARY\n"
+                 f"{'='*60}\n"
+                 f"  Regression MAE: {mae:.1f} mL\n"
+                 f"  Regression R²:  {r2:.3f}\n"
+                 f"  Samples evaluated: {len(y_true_valid)}\n"
+                 f"  Sessions: {len(session_info)}\n")
+        print(footer)
+        f.write(footer)
+    
+    print(f"\n✓ Metrics saved to: {metrics_file}")
     return mae, r2
+
+
 
 
 # ============================================================
