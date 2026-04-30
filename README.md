@@ -10,6 +10,7 @@ Data is found in this google drive: https://drive.google.com/drive/folders/1aj9T
 Please download it and move the data into the same folder as the github repo (same folder as main.sh)
 
 Workflow of main.sh:
+Requires master csv: (for this project, it is "BladderVolFYP_MasterDataset_First8.csv" also found in the google drive.
 
 ///// #1 ///////
 DataPreprocessing.py
