@@ -12,6 +12,8 @@ Please download it and move the data into the same folder as the github repo (sa
 Workflow of main.sh:
 Requires master csv: (for this project, it is "BladderVolFYP_MasterDataset_First8.csv" also found in the google drive.
 
+Furthermore, if one wants to skip any part of the main.sh, simply comment out the respective function and it will skip the step (eg, when redoing the pipeline and only wanting to retrain the model, comment out steps 1-5), provided that data already exists. Alternatively, change file-paths whenever appropriate.
+
 ///// #1 ///////
 DataPreprocessing.py
 This function loads raw intensity data from a 16-channel (or 4-channel) NIRS device, filter out noisy channels and motion artifacts, and convert the cleaned optical data into hemoglobin concentration changes (HbO and HbR) using the Modified Beer-Lambert Law. The output is a cleaned, time-series-ready CSV file.
@@ -372,4 +374,5 @@ BladderDicomViewer.py
 A dictionary within the file entails all the relevant dicom files that are used. This script displays them all side-by-side for easier viewing and double-checking of all the images to check their quality and to measure the bladder volume.
 
 Ultrasound_validation2.Rmd:
-This script takes in input of Depth, Height and Width of bladder volume images, manually measured and filled in a spreadsheet. It then calculates the bladder volume based on formula D*H*W*0.7, and appends this information to the resultant csv file. Additionally, it can filter out images labelled "0" as NA or "1" as poor quality, though doing so reduces the number of viable data as files would not have respective ground truth.
+This script takes in input of Depth, Height and Width of bladder volume images, manually measured and filled in a spreadsheet. It then calculates the bladder volume based on formula D*H*W*0.72, and appends this information to the resultant csv file. Additionally, it can filter out images labelled "0" as NA or "1" as poor quality, though doing so reduces the number of viable data as files would not have respective ground truth.
+Utilizes dplyr to mutate and add cols for bladder volume, or filter to filter out certain image types.
