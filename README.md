@@ -384,6 +384,8 @@ Same as FeatureSelector.py, but in jupyter notebook form for convenience, allowi
 plot.ipynb
 Cleaner and prettier way for feature extraction, filtration and estimation of bladder volume. Build, evaluate, and visualize machine learning models that predict bladder volume from NIRS-derived features using a dataset of 4 patients across multiple sessions. The notebook implements three distinct feature engineering approaches, evaluates multiple regression models using 5-fold cross-validation, and generates comprehensive comparative visualizations. Can act as a standalone file from the main pipeline, requires Y_expanded.xlsx and Data_Split/ folder for metadata and data folder respectively as input.
 
+#### Data_split folder is stored within the google drive folder (same as other data) please download it and drag to same folder as plot.ipynb for it to work.
+
 Functions within:
 Section 1: Data Loading and Cleaning
 Purpose: Loads the master metadata spreadsheet and performs initial data quality checks.
