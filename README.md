@@ -379,3 +379,96 @@ Utilizes dplyr to mutate and add cols for bladder volume, or filter to filter ou
 
 FeatureSelector.ipynb
 Same as FeatureSelector.py, but in jupyter notebook form for convenience, allowing users to instantly see graphs in the notebook. An example was done on a patient5 csv.
+
+///////
+plot.ipynb
+Cleaner and prettier way for feature extraction, filtration and estimation of bladder volume. Build, evaluate, and visualize machine learning models that predict bladder volume from NIRS-derived features using a dataset of 4 patients across multiple sessions. The notebook implements three distinct feature engineering approaches, evaluates multiple regression models using 5-fold cross-validation, and generates comprehensive comparative visualizations. Can act as a standalone file from the main pipeline, requires Y_expanded.xlsx and Data_Split/ folder for metadata and data folder respectively as input.
+
+Functions within:
+Section 1: Data Loading and Cleaning
+Purpose: Loads the master metadata spreadsheet and performs initial data quality checks.
+
+Filters out Patient 4 (excluded from analysis).
+
+Removes a specific anomalous entry: Patient 6's CSV3 data.
+
+Cleans volume values by clipping to [0, 600] mL range and forward/backward filling missing values within patient groups.
+
+Prints dataset statistics (volume range, samples per patient).
+
+Section 2: Feature Extraction (extract_features)
+Purpose: Converts raw NIRS CSV files into fixed-length feature vectors for each time point.
+
+For each CSV file, drops non-numeric columns (timestamp, label, Interpolated_Volume).
+
+Computes per-channel statistics: mean, standard deviation, max, min, 25th percentile (Q1), 75th percentile (Q3).
+
+Computes pairwise channel ratios (e.g., ch1/ch2 and ch2/ch1 for all channel pairs).
+
+Handles NaN/Inf values by replacing them with zeros.
+
+Returns both the feature array and corresponding feature names.
+
+Section 3: Building Raw Records
+Purpose: Iterates through all patient data, extracts features from each CSV file, and assembles a list of raw records containing patient ID, part number, feature vector, and true bladder volume.
+
+Section 4: Prediction Sanity Filter (clean_predictions)
+Purpose: Post-processes model predictions to ensure physical plausibility.
+
+Clips predictions outside the valid volume range [0, 600] mL.
+
+Forward/backward fills remaining invalid values.
+
+Falls back to the training mean for any still-invalid predictions.
+
+Section 5: Feature Matrix Builders (build_matrices, get_feature_names)
+Purpose: Constructs feature matrices for three distinct modeling approaches:
+
+Approach	Features Included	Rationale
+Calibration-Assisted	Current features + previous features + previous volume	Uses lag volume as a predictor (strong baseline)
+Baseline-Normalised	(Current - baseline) + (Previous - baseline) + previous volume	Normalizes features relative to first measurement
+Pure Optics	Current features + previous features ONLY	Tests if optical signals alone can predict volume
+For each patient, features are computed sequentially, with the previous time point's features and volume used as predictors for the current volume.
+
+The first time point uses zero vectors as previous features and 0 mL as previous volume.
+
+Section 6: Model Factory (get_models)
+Purpose: Defines the suite of regression models to evaluate:
+
+Random Forest (100 trees, max depth 6)
+
+Gradient Boosting (100 estimators, learning rate 0.05, max depth 3)
+
+SVR with RBF kernel (C=10, epsilon=0.1)
+
+Ridge regression at three regularization strengths (α=0.1, 1, 10)
+
+Section 7: 5-Fold Cross-Validation Runner (run_kfold_cv)
+Purpose: Implements a rigorous evaluation framework:
+
+Splits data into 5 folds (shuffled, stratified by random sampling).
+
+For each fold:
+
+Standardizes features using StandardScaler.
+Normalizes targets to [0,1] using MinMaxScaler.
+Trains each model on standardized/normalized data.
+Inverse-transforms predictions back to original scale.
+Applies the prediction sanity filter.
+Computes RMSE, MAE, and R².
+Stores the last fold's trained models and scaled data for subsequent feature importance analysis.
+
+Prints a formatted summary table per approach.
+
+Section 8: Running All Approaches
+Executes the full pipeline for all three approaches (calib, baseline, pure).
+
+Stores results in a dictionary keyed by approach name.
+
+Section 9: Summary Table
+Compiles all results into a single DataFrame sorted by R² (descending).
+
+Identifies and prints the best model and approach combination.
+
+Resultant figures:
+Feature importance, R^2/RMSE Comparison, Actual vs Predicted comparison, Bland-Altman plot, Error boxplots, Fold RMSE stability, and performance heatmaps (saved in result figures folder)
