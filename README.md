@@ -376,3 +376,6 @@ A dictionary within the file entails all the relevant dicom files that are used.
 Ultrasound_validation2.Rmd:
 This script takes in input of Depth, Height and Width of bladder volume images, manually measured and filled in a spreadsheet. It then calculates the bladder volume based on formula D*H*W*0.72, and appends this information to the resultant csv file. Additionally, it can filter out images labelled "0" as NA or "1" as poor quality, though doing so reduces the number of viable data as files would not have respective ground truth.
 Utilizes dplyr to mutate and add cols for bladder volume, or filter to filter out certain image types.
+
+FeatureSelector.ipynb
+Same as FeatureSelector.py, but in jupyter notebook form for convenience, allowing users to instantly see graphs in the notebook. An example was done on a patient5 csv.
