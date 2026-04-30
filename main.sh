@@ -26,6 +26,17 @@ tail -n +2 "$input_file" | while IFS=',' read -r patient_id folder us1 us2 bv1 u
     bv4="${bv4//\"/}"
     bv5="${bv5//\"/}"
     pvr="${pvr//\"/}"
+    bv6="NA" #Quick-fix for earlier error
+
+    csv4=$(echo "$csv4" | tr -d '\r\n\t ' | sed 's/"//g')
+
+    printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n" \
+    "$patient_id" \
+    "Feature_Extracted_y/optics_data_${csv1}_part1.cleaned_windows_features_features.csv" \
+    "Feature_Extracted_y/optics_data_${csv2}_part1.cleaned_windows_features_features.csv" \
+    "Feature_Extracted_y/optics_data_${csv3}_part1.cleaned_windows_features_features.csv" \
+    "Feature_Extracted_y/optics_data_${csv4}_part1.cleaned_windows_features_features.csv" \
+    "$bv1" "$bv3" "$bv4" "$bv5" "NA" "$pvr" >> "$CONFIG_CSV
 
     # Store bladder volumes for later validation (if needed)
     bladder_volumes=("$bv1" "$pvr" "$bv3" "$bv4" "$bv5")
@@ -82,6 +93,8 @@ tail -n +2 "$input_file" | while IFS=',' read -r patient_id folder us1 us2 bv1 u
         # ============================================
         echo "  [4/5] Running Fourth Script..."
         python3 FeatureSelector.py "Feature_Extracted/optics_data_${csv_name}_part1.cleaned_windows_features.csv"
+        echo "Generating additional visualizations..."
+        python3 FeatureSelector3.py "Feature_Extracted/optics_data_${csv_name}_part1.cleaned_windows_features.csv"
          echo "  ✓ FeatureSelector complete"
         
         # ============================================
@@ -110,6 +123,50 @@ tail -n +2 "$input_file" | while IFS=',' read -r patient_id folder us1 us2 bv1 u
     
     echo ""
     echo "✓ Patient $patient_id complete"
+
+            # ============================================
+        # SCRIPT 7: Model (Scikit learn version)
+        # ============================================
+
+    
+    echo "  [7/8] Running Seventh Script..."
+    python3 ScikitModel.py \
+    "Feature_Extracted_y/optics_data_${csv1}_part1.cleaned_windows_features_features.csv" \
+    "Feature_Extracted_y/optics_data_${csv2}_part1.cleaned_windows_features_features.csv" \
+    "Feature_Extracted_y/optics_data_${csv3}_part1.cleaned_windows_features_features.csv" \
+    "Feature_Extracted_y/optics_data_${csv4}_part1.cleaned_windows_features_features.csv" \
+    $bv1 $bv3 $bv4 $bv5 $bv6 $pvr \
+    --pid ${patient_id}
+    echo "  ✓ Model training complete"
+    
+    echo ""
+    echo "✓ Patient $patient_id complete"
+
+    echo "  [8/8] Running Eight Script..."
+    python3 FeatureSelectorBig.py \
+    "Feature_Extracted/optics_data_${csv1}_part1.cleaned_windows_features.csv" \
+    "Feature_Extracted/optics_data_${csv2}_part1.cleaned_windows_features.csv" \
+    "Feature_Extracted/optics_data_${csv3}_part1.cleaned_windows_features.csv" \
+    "Feature_Extracted/optics_data_${csv4}_part1.cleaned_windows_features.csv" \
+    $bv1 $bv3 $bv4 $bv5 $bv6 $pvr \
+    --pid ${patient_id}
+    
+done
+
+# ============================================
+# SCRIPT 7: Combined Model (ALL patients)
+# ============================================
+echo ""
+echo "========================================="
+echo "TRAINING COMBINED MODEL (ALL PATIENTS)"
+echo "========================================="
+
+python3 ScikitModelBig.py "$CONFIG_CSV"
+
+echo ""
+echo "========================================="
+echo "Pipeline Complete!"
+echo "========================================="
     
 done
 
@@ -118,17 +175,3 @@ echo "========================================="
 echo "Pipeline Complete!"
 echo "========================================="
 
-
-#Run Feature Extraction
-
-python3 FeatureExtracion.py TO_Data/
-
-#Run Feature Selection
-python3 FeatureSelector.ipynb
-
-#Run the feature engineering
-python3 y_features.py 
-
-
-
-#Run Model
