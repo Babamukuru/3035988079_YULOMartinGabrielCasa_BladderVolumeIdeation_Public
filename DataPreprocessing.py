@@ -1,619 +1,517 @@
+#!/usr/bin/env python3
 """
-NIRS Preprocessing Pipeline with Kalman Filtering
-Handles: quality check, motion correction, OD conversion, filtering, Beer-Lambert
+Bladder Volume NIRS Data Preprocessing Pipeline
+Handles both 16-channel and 4-channel optical data formats
 """
 
 import numpy as np
 import pandas as pd
-from scipy import signal
-from scipy.signal import butter, filtfilt
-from scipy.linalg import solve_discrete_lyapunov
 import pywt
-from filterpy.kalman import KalmanFilter  # You'll need: pip install filterpy
+from scipy import signal
+from scipy.signal import butter, filtfilt, savgol_filter
+from scipy.interpolate import UnivariateSpline
+import argparse
+import os
+import warnings
+warnings.filterwarnings('ignore')
 
+# ============================================================================
+# PARAMETER CONFIGURATION SECTION - ADJUST THESE AS NEEDED
+# ============================================================================
 
-class NIRSPreprocessor:
+class PreprocessingParams:
+    """Centralized parameters for preprocessing pipeline"""
+    
+    # Channel filtering parameters
+    MIN_INTENSITY_THRESHOLD = 0  # Minimum mean intensity to keep channel
+    CHANNEL_REMOVAL_THRESHOLD = 0.9  # Remove if >50% of channels fail threshold
+    
+    # Wavelet filtering parameters
+    WAVELET_FAMILY = 'db4'  # Daubechies 4 wavelet
+    WAVELET_LEVEL = 5  # Decomposition level
+    WAVELET_THRESHOLD_METHOD = 'soft'  # 'soft' or 'hard' thresholding
+    
+    # Spline correction parameters
+    SPLINE_SMOOTHING_FACTOR = 0.01  # s parameter for UnivariateSpline
+    SPLINE_PERCENTILE = 10  # Percentile for baseline estimation
+    
+    # Kalman filtering parameters
+    KALMAN_PROCESS_NOISE = 0.001  # Q - process noise covariance
+    KALMAN_MEASUREMENT_NOISE = 0.1  # R - measurement noise covariance
+    KALMAN_INITIAL_ERROR = 1.0  # P0 - initial error covariance
+    
+    # Optical density conversion parameters
+    PATH_LENGTH = 1.0  # Path length factor (adjust based on your setup)
+    DPF = 6.0  # Differential pathlength factor (typical for tissue)
+    
+    # Bandpass filtering parameters (in Hz, assuming sample rate)
+    SAMPLE_RATE = 10.0  # Hz - adjust based on your acquisition rate
+    LOWPASS_CUTOFF = 0.67  # Hz - physiological signals typically <0.5 Hz
+    HIGHPASS_CUTOFF = 0.001  # Hz - remove very slow drifts
+    FILTER_ORDER = 2  # Butterworth filter order
+    
+    # Beer-Lambert parameters (extinction coefficients in mM^-1 cm^-1)
+    # Wavelengths: 730nm and 850nm
+    EXTINCTION_HBO_730 = 0.38  # HbO extinction at 730nm
+    EXTINCTION_HBR_730 = 0.86  # HbR extinction at 730nm
+    EXTINCTION_HBO_850 = 0.87  # HbO extinction at 850nm
+    EXTINCTION_HBR_850 = 0.39  # HbR extinction at 850nm
+
+# ============================================================================
+# DATA LOADING AND VALIDATION
+# ============================================================================
+
+def load_and_validate_data(filepath):
     """
-    Flexible NIRS preprocessing class adaptable to different channel configurations
-    
-    Parameters (Complete List - Fill These In!)
-    --------------------------------------------
-    fs : float
-        Sampling frequency in Hz [DEFAULT: 10.2, YOUR VALUE: ______]
-    wavelengths : list
-        Measurement wavelengths in nm [DEFAULT: [730, 850], YOUR VALUE: ______]
-    source_detector_dist : float
-        Source-detector separation in mm [DEFAULT: 30, YOUR VALUE: ______]
-    intensity_threshold : float
-        Minimum acceptable raw intensity [DEFAULT: 0.05, YOUR VALUE: ______]
-    impedance_threshold : float
-        Maximum acceptable impedance in kOhm [DEFAULT: 5, YOUR VALUE: ______]
-    baseline_sec : float
-        Seconds used for baseline calculation [DEFAULT: 30, YOUR VALUE: ______]
-    lowcut : float
-        Bandpass low cutoff in Hz [DEFAULT: 0.01, YOUR VALUE: ______]
-    highcut : float
-        Bandpass high cutoff in Hz [DEFAULT: 0.5, YOUR VALUE: ______]
-    filter_order : int
-        Butterworth filter order [DEFAULT: 3, YOUR VALUE: ______]
-    wavelet : str
-        Wavelet type for decomposition [DEFAULT: 'db4', YOUR VALUE: ______]
-    wavelet_level : int
-        Wavelet decomposition level [DEFAULT: 4, YOUR VALUE: ______]
-    wavelet_threshold_factor : float
-        Threshold multiplier for wavelet [DEFAULT: 2.5, YOUR VALUE: ______]
-    artifact_std_threshold : float
-        Std multiplier for artifact detection [DEFAULT: 3.0, YOUR VALUE: ______]
-    spline_smoothing : float
-        Spline smoothing factor (0=exact) [DEFAULT: 0, YOUR VALUE: ______]
-    kalman_Q : float
-        Kalman process noise covariance [DEFAULT: 1e-4, YOUR VALUE: ______]
-    kalman_R : float
-        Kalman measurement noise covariance [DEFAULT: 0.01, YOUR VALUE: ______]
-    kalman_model_order : int
-        Kalman AR model order [DEFAULT: 2, YOUR VALUE: ______]
-    kalman_P_init : float
-        Kalman initial state covariance [DEFAULT: 1.0, YOUR VALUE: ______]
-    dpf_730 : float
-        DPF at 730nm for abdominal tissue [DEFAULT: 5.0, YOUR VALUE: ______]
-    dpf_850 : float
-        DPF at 850nm for abdominal tissue [DEFAULT: 4.5, YOUR VALUE: ______]
+    Load CSV and identify data format (16 or 4 channels)
+    Returns: dataframe, filename, channel_count, channel_names
     """
+    # Extract filename without extension for output naming
+    filename = os.path.splitext(os.path.basename(filepath))[0]
     
-    def __init__(self, 
-                 # System parameters
-                 fs=10.2,
-                 wavelengths=[730, 850],
-                 source_detector_dist=30,
-                 
-                 # Quality check parameters
-                 intensity_threshold=0.05,
-                 impedance_threshold=5,
-                 baseline_sec=30,
-                 
-                 # Filter parameters
-                 lowcut=0.01,
-                 highcut=0.5,
-                 filter_order=3,
-                 
-                 # Wavelet parameters
-                 wavelet='db4',
-                 wavelet_level=4,
-                 wavelet_threshold_factor=2.5,
-                 
-                 # Spline parameters
-                 artifact_std_threshold=3.0,
-                 spline_smoothing=0,
-                 
-                 # Kalman parameters
-                 kalman_Q=1e-4,
-                 kalman_R=0.01,
-                 kalman_model_order=2,
-                 kalman_P_init=1.0,
-                 
-                 # Beer-Lambert parameters
-                 dpf_730=5.0,  # PLACEHOLDER - VERIFY FOR ABDOMEN!
-                 dpf_850=4.5,  # PLACEHOLDER - VERIFY FOR ABDOMEN!
-                 
-                 # Additional settings
-                 verbose=True):
-        
-        # Store all parameters
-        self.fs = fs
-        self.wavelengths = wavelengths
-        self.dist = source_detector_dist
-        self.intensity_threshold = intensity_threshold
-        self.impedance_threshold = impedance_threshold
-        self.baseline_sec = baseline_sec
-        self.baseline_samples = int(fs * baseline_sec)
-        self.lowcut = lowcut
-        self.highcut = highcut
-        self.filter_order = filter_order
-        self.wavelet = wavelet
-        self.wavelet_level = wavelet_level
-        self.wavelet_threshold_factor = wavelet_threshold_factor
-        self.artifact_std_threshold = artifact_std_threshold
-        self.spline_smoothing = spline_smoothing
-        self.kalman_Q = kalman_Q
-        self.kalman_R = kalman_R
-        self.kalman_model_order = kalman_model_order
-        self.kalman_P_init = kalman_P_init
-        self.verbose = verbose
-        
-        # DPF values (wavelength specific)
-        self.dpf = {730: dpf_730, 850: dpf_850}
-        
-        # Standard extinction coefficients [cm⁻¹/mM]
-        # Source: [Your citation here]
-        self.extinction = {
-            730: {'HbO': 0.52, 'HbR': 1.28},
-            850: {'HbO': 1.14, 'HbR': 0.79}
-        }
-        
-        if self.verbose:
-            self._print_parameters()
+    # Load data
+    df = pd.read_csv(filepath)
     
-    def _print_parameters(self):
-        """Print all current parameters for verification"""
-        print("\n" + "="*60)
-        print("NIRS PREPROCESSOR CONFIGURATION")
-        print("="*60)
-        print(f"\nSYSTEM PARAMETERS:")
-        print(f"  fs: {self.fs} Hz")
-        print(f"  wavelengths: {self.wavelengths} nm")
-        print(f"  source-detector distance: {self.dist} mm")
-        
-        print(f"\nQUALITY CHECK:")
-        print(f"  intensity_threshold: {self.intensity_threshold}")
-        print(f"  impedance_threshold: {self.impedance_threshold} kOhm")
-        print(f"  baseline_sec: {self.baseline_sec} s")
-        
-        print(f"\nFILTERING:")
-        print(f"  bandpass: {self.lowcut}-{self.highcut} Hz")
-        print(f"  filter_order: {self.filter_order}")
-        
-        print(f"\nWAVELET:")
-        print(f"  type: {self.wavelet}")
-        print(f"  level: {self.wavelet_level}")
-        print(f"  threshold_factor: {self.wavelet_threshold_factor}")
-        
-        print(f"\nSPLINE:")
-        print(f"  artifact_std_threshold: {self.artifact_std_threshold}")
-        print(f"  spline_smoothing: {self.spline_smoothing}")
-        
-        print(f"\nKALMAN:")
-        print(f"  Q (process noise): {self.kalman_Q}")
-        print(f"  R (measurement noise): {self.kalman_R}")
-        print(f"  model_order: {self.kalman_model_order}")
-        print(f"  P_init: {self.kalman_P_init}")
-        
-        print(f"\nBEER-LAMBERT:")
-        print(f"  DPF 730nm: {self.dpf[730]}")
-        print(f"  DPF 850nm: {self.dpf[850]}")
-        print(f"  Extinction coefficients: from literature")
-        print("="*60 + "\n")
+    # Identify timestamp column (assume first column if named 'timestamp')
+    if 'timestamp' in df.columns:
+        timestamp_col = 'timestamp'
+    else:
+        timestamp_col = df.columns[0]
     
-    def quality_check(self, raw_intensity_df, impedance_df=None):
-        """
-        Check channel quality based on raw intensity and impedance
-        """
-        # Calculate mean intensity during baseline period
-        baseline_data = raw_intensity_df.iloc[:self.baseline_samples]
-        mean_intensity = baseline_data.mean()
+    # Identify optical channels (exclude timestamp and label columns)
+    label_cols = [col for col in df.columns if 'label' in col.lower() or 'notes' in col.lower()]
+    optical_cols = [col for col in df.columns if col not in [timestamp_col] + label_cols]
+    
+    channel_count = len(optical_cols)
+    
+    print(f"Loaded data from {filename}")
+    print(f"  - {channel_count} optical channels detected")
+    print(f"  - Data shape: {df.shape}")
+    print(f"  - Time range: {df[timestamp_col].iloc[0]} to {df[timestamp_col].iloc[-1]}")
+    
+    # Validate channel count
+    if channel_count not in [4, 16]:
+        print(f"  WARNING: Expected 4 or 16 channels, found {channel_count}")
+    
+    return df, filename, timestamp_col, optical_cols, channel_count
+
+# ============================================================================
+# STEP 1: MEAN INTENSITY THRESHOLDING
+# ============================================================================
+
+def channel_intensity_filtering(df, optical_cols, params):
+    """
+    Calculate mean intensity per channel and exclude channels below threshold
+    Returns: filtered dataframe, list of kept channels, removal report
+    """
+    optical_cols = list(optical_cols)
+    mean_intensities = df[optical_cols].mean()
+    
+    # Identify channels to keep
+    keep_mask = mean_intensities >= params.MIN_INTENSITY_THRESHOLD
+    channels_to_keep = [optical_cols[i] for i in range(len(optical_cols)) if keep_mask.iloc[i]]
+    channels_to_remove = [optical_cols[i] for i in range(len(optical_cols)) if not keep_mask.iloc[i]]
+    
+    # Check if too many channels are failing
+    removal_ratio = len(channels_to_remove) / len(optical_cols)
+    
+    if removal_ratio > params.CHANNEL_REMOVAL_THRESHOLD:
+        print(f"  WARNING: {removal_ratio*100:.1f}% of channels below threshold")
+        print(f"  Consider lowering MIN_INTENSITY_THRESHOLD ({params.MIN_INTENSITY_THRESHOLD})")
+    
+    print(f"  Kept {len(channels_to_keep)}/{len(optical_cols)} channels")
+    if len(channels_to_remove) > 0:
+        print(f"  Removed channels (mean intensity): {channels_to_remove}")
+        print(f"    Mean intensities: {mean_intensities[channels_to_remove].to_dict()}")
+    
+    # Create filtered dataframe
+    df_filtered = df[list(channels_to_keep) + ['timestamp']].copy()
+    
+    return df_filtered, channels_to_keep, channels_to_remove
+
+# ============================================================================
+# STEP 2: WAVELET FILTERING
+# ============================================================================
+
+def wavelet_filter(data, params):
+    """
+    Apply wavelet thresholding for noise reduction
+    """
+    coeffs = pywt.wavedec(data, params.WAVELET_FAMILY, level=params.WAVELET_LEVEL)
+    
+    # Apply thresholding to detail coefficients
+    coeffs_thresh = list(coeffs)
+    for i in range(1, len(coeffs_thresh)):
+        sigma = np.median(np.abs(coeffs_thresh[i])) / 0.6745  # MAD estimator
+        threshold = sigma * np.sqrt(2 * np.log(len(data)))
         
-        # Find channels above threshold
-        intensity_ok = mean_intensity[mean_intensity > self.intensity_threshold].index.tolist()
+        if params.WAVELET_THRESHOLD_METHOD == 'soft':
+            coeffs_thresh[i] = pywt.threshold(coeffs_thresh[i], threshold, mode='soft')
+        else:  # hard thresholding
+            coeffs_thresh[i] = pywt.threshold(coeffs_thresh[i], threshold, mode='hard')
+    
+    # Reconstruct signal
+    filtered_data = pywt.waverec(coeffs_thresh, params.WAVELET_FAMILY)
+    
+    # Ensure same length (sometimes reconstruction adds a sample)
+    if len(filtered_data) > len(data):
+        filtered_data = filtered_data[:len(data)]
+    
+    return filtered_data
+
+# ============================================================================
+# STEP 2: SPLINE CORRECTION FOR BASELINE DRIFT
+# ============================================================================
+
+def spline_baseline_correction(data, params):
+    """
+    Estimate baseline using spline fitting and subtract it
+    """
+    x = np.arange(len(data))
+    
+    # Find baseline points (e.g., local minima or percentile values)
+    window_size = int(len(data) / 10)  # Adaptive window size
+    baseline_points = []
+    
+    for i in range(0, len(data), window_size):
+        segment = data[i:min(i+window_size, len(data))]
+        if len(segment) > 0:
+            baseline_val = np.percentile(segment, params.SPLINE_PERCENTILE)
+            baseline_points.append(baseline_val)
+    
+    # Create spline through baseline points
+    baseline_x = np.linspace(0, len(data)-1, len(baseline_points))
+    spline = UnivariateSpline(baseline_x, baseline_points, s=params.SPLINE_SMOOTHING_FACTOR)
+    baseline_estimate = spline(x)
+    
+    # Subtract baseline
+    corrected_data = data - baseline_estimate
+    
+    return corrected_data
+
+# ============================================================================
+# STEP 2: KALMAN FILTER FOR MOTION ARTIFACT ATTENUATION
+# ============================================================================
+
+def kalman_filter(data, params):
+    """
+    Apply Kalman filter to reduce motion artifacts
+    """
+    n_samples = len(data)
+    
+    # Initialize Kalman filter
+    x_est = data[0]  # Initial state estimate
+    P_est = params.KALMAN_INITIAL_ERROR  # Initial error covariance
+    
+    filtered_data = np.zeros(n_samples)
+    filtered_data[0] = x_est
+    
+    for k in range(1, n_samples):
+        # Prediction step
+        x_pred = x_est  # Assume constant state (no motion model)
+        P_pred = P_est + params.KALMAN_PROCESS_NOISE
         
-        # Cross-reference with impedance if available
-        if impedance_df is not None:
-            impedance_ok = impedance_df[impedance_df < self.impedance_threshold].index.tolist()
-            good_channels = list(set(intensity_ok) & set(impedance_ok))
+        # Update step
+        K = P_pred / (P_pred + params.KALMAN_MEASUREMENT_NOISE)  # Kalman gain
+        x_est = x_pred + K * (data[k] - x_pred)
+        P_est = (1 - K) * P_pred
+        
+        filtered_data[k] = x_est
+    
+    return filtered_data
+
+# ============================================================================
+# STEP 2: COMBINED MOTION ARTIFACT ATTENUATION
+# ============================================================================
+
+def motion_artifact_attenuation(df, channel_cols, params):
+    """
+    Apply wavelet filtering, spline correction, and Kalman filtering
+    """
+    df_motion_corrected = df.copy()
+    
+    for col in channel_cols:
+        data = df[col].values
+        
+        # Step 2a: Wavelet filtering
+        wavelet_filtered = wavelet_filter(data, params)
+        
+        # Step 2b: Spline baseline correction
+        spline_corrected = spline_baseline_correction(wavelet_filtered, params)
+        
+        # Step 2c: Kalman filtering
+        kalman_filtered = kalman_filter(spline_corrected, params)
+        
+        df_motion_corrected[col] = kalman_filtered
+    
+    return df_motion_corrected
+
+# ============================================================================
+# STEP 3: CONVERT TO OPTICAL DENSITY
+# ============================================================================
+
+def convert_to_optical_density(df, channel_cols, params):
+    """
+    Convert intensity data to optical density (OD)
+    OD = -log10(I / I0) where I0 is baseline intensity
+    """
+    df_od = df.copy()
+    
+    for col in channel_cols:
+        # Use mean of first 10% of data as baseline intensity (I0)
+        baseline_samples = int(len(df) * 0.1)
+        I0 = np.mean(df[col].iloc[:baseline_samples])
+        
+        # Avoid log(0) or negative values
+        I = np.maximum(df[col].values, 1e-10)
+        I0 = max(I0, 1e-10)
+        
+        # Calculate OD
+        od_values = -np.log10(I / I0)
+        df_od[col] = od_values
+    
+    return df_od
+
+# ============================================================================
+# STEP 4: BANDPASS FILTERING
+# ============================================================================
+
+def butter_bandpass(lowcut, highcut, fs, order):
+    """Design Butterworth bandpass filter"""
+    nyquist = 0.5 * fs
+    low = lowcut / nyquist
+    high = highcut / nyquist
+    b, a = butter(order, [low, high], btype='band')
+    return b, a
+
+def bandpass_filter(data, params):
+    """
+    Apply bandpass filter to remove high-frequency noise and low-frequency drift
+    """
+    b, a = butter_bandpass(params.HIGHPASS_CUTOFF, params.LOWPASS_CUTOFF, 
+                          params.SAMPLE_RATE, params.FILTER_ORDER)
+    
+    # Apply zero-phase filtering to avoid phase shift
+    filtered_data = filtfilt(b, a, data)
+    
+    return filtered_data
+
+def apply_bandpass_filtering(df, channel_cols, params):
+    """
+    Apply bandpass filtering to all optical channels
+    """
+    df_filtered = df.copy()
+    
+    for col in channel_cols:
+        df_filtered[col] = bandpass_filter(df[col].values, params)
+    
+    return df_filtered
+
+# ============================================================================
+# STEP 5: BEER-LAMBERT CONVERSION TO HbO/HbR
+# ============================================================================
+
+def beer_lambert_conversion(df_od_730, df_od_850, params):
+    """
+    Convert optical density to hemoglobin concentrations using modified Beer-Lambert law
+    Returns: HbO and HbR concentrations
+    """
+    # Modified Beer-Lambert law:
+    # OD = (ε_HbO * C_HbO + ε_HbR * C_HbR) * L * DPF
+    # Where L is path length, DPF is differential pathlength factor
+    
+    # Solve linear system for each time point
+    # [OD_730]   [ε_HbO_730  ε_HbR_730] [C_HbO]
+    # [OD_850] = [ε_HbO_850  ε_HbR_850] [C_HbR] * (L * DPF)
+    
+    # Create extinction matrix
+    epsilon = np.array([
+        [params.EXTINCTION_HBO_730, params.EXTINCTION_HBR_730],
+        [params.EXTINCTION_HBO_850, params.EXTINCTION_HBR_850]
+    ])
+    
+    # Path length factor
+    path_factor = params.PATH_LENGTH * params.DPF
+    
+    # Solve for concentrations
+    epsilon_inv = np.linalg.inv(epsilon)
+    
+    n_samples = len(df_od_730)
+    hbo = np.zeros(n_samples)
+    hbr = np.zeros(n_samples)
+    
+    for i in range(n_samples):
+        od_vector = np.array([df_od_730.iloc[i], df_od_850.iloc[i]])
+        conc = np.dot(epsilon_inv, od_vector) / path_factor
+        hbo[i] = conc[0]
+        hbr[i] = conc[1]
+    
+    return hbo, hbr
+
+def process_beer_lambert(df, channel_cols, params):
+    """
+    Process Beer-Lambert conversion for all channels
+    For each optical channel pair (730nm and 850nm at same location)
+    """
+    # Determine channel pairs based on naming convention
+    # Expecting channels like: '730nm left outer', '850nm left outer', etc.
+    
+    hbo_columns = []
+    hbr_columns = []
+    
+    # Group channels by location and type (left/right, inner/outer)
+    channel_pairs = [
+        ('left_outer', 'optics1_uA', 'optics3_uA'),   # 730nm left outer + 850nm left outer
+        ('right_outer', 'optics2_uA', 'optics4_uA'),  # 730nm right outer + 850nm right outer
+        ('left_inner', 'optics5_uA', 'optics7_uA'),   # 730nm left inner + 850nm left inner
+        ('right_inner', 'optics6_uA', 'optics8_uA'),  # 730nm right inner + 850nm right inner
+    ]
+    
+    print("  Looking for channel pairs:")
+    
+    # Process each pair
+    for location, channel_730, channel_850 in channel_pairs:
+        # Check if both channels exist in the dataframe
+        if channel_730 in df.columns and channel_850 in df.columns:
+            print(f"    Found pair: {channel_730} (730nm) + {channel_850} (850nm) -> {location}")
             
-            if self.verbose:
-                print(f"Quality check: {len(good_channels)}/{len(raw_intensity_df.columns)} channels passed")
-                print(f"  - Passed intensity: {len(intensity_ok)}")
-                print(f"  - Passed impedance: {len(impedance_ok)}")
-        else:
-            good_channels = intensity_ok
-            if self.verbose:
-                print(f"Quality check: {len(good_channels)}/{len(raw_intensity_df.columns)} channels passed (intensity only)")
-        
-        return good_channels
-    
-    def wavelet_filter(self, data):
-        """
-        Wavelet-based motion artifact filtering
-        
-        The wavelet transform decomposes the signal into different frequency bands.
-        Motion artifacts appear as large coefficients that are outliers compared to
-        the expected Gaussian distribution of clean physiological signals. By
-        thresholding these outliers and reconstructing, we remove artifacts while
-        preserving the underlying signal.
-        """
-        # Decompose signal
-        coeffs = pywt.wavedec(data, self.wavelet, level=self.wavelet_level)
-        
-        # Calculate threshold using median absolute deviation (MAD)
-        # MAD is robust to outliers, making it ideal for artifact detection
-        sigma = np.median(np.abs(coeffs[-1])) / 0.6745
-        threshold = self.wavelet_threshold_factor * sigma
-        
-        # Apply soft thresholding to detail coefficients (skip approximation)
-        coeffs_thresh = list(coeffs)
-        for i in range(1, len(coeffs_thresh)):
-            coeffs_thresh[i] = pywt.threshold(
-                coeffs_thresh[i], 
-                threshold, 
-                mode='soft'  # Soft thresholding preserves continuity
+            # Convert to HbO/HbR
+            hbo, hbr = beer_lambert_conversion(
+                df[channel_730], df[channel_850], params
             )
-        
-        # Reconstruct signal
-        cleaned = pywt.waverec(coeffs_thresh, self.wavelet)
-        
-        # Trim to original length (wavelet reconstruction may add samples)
-        return cleaned[:len(data)]
-    
-    def spline_correction(self, data):
-        """
-        Spline interpolation for baseline shift correction
-        
-        This method identifies segments where motion artifacts cause baseline shifts,
-        then uses clean surrounding data to interpolate over the corrupted region.
-        The cubic spline ensures smooth transitions between clean and corrected segments.
-        """
-        from scipy.interpolate import UnivariateSpline
-        
-        # Step 1: Detect artifacts using moving standard deviation
-        window = int(self.fs * 2)  # 2-second window
-        moving_std = pd.Series(data).rolling(window, center=True, min_periods=1).std().values
-        
-        # Identify artifact regions (where std exceeds threshold)
-        artifact_mask = moving_std > (self.artifact_std_threshold * np.nanstd(data))
-        artifact_indices = np.where(artifact_mask)[0]
-        
-        # If no artifacts, return original
-        if len(artifact_indices) == 0:
-            return data
-        
-        # Find clean segments (non-artifact)
-        clean_indices = np.setdiff1d(np.arange(len(data)), artifact_indices)
-        
-        if len(clean_indices) < self.kalman_model_order + 2:
-            if self.verbose:
-                print("Warning: Insufficient clean data for spline correction")
-            return data
-        
-        # Fit spline to clean data
-        # s=self.spline_smoothing: 0 = exact interpolation through points
-        spline = UnivariateSpline(
-            clean_indices, 
-            data[clean_indices], 
-            k=3,  # cubic spline
-            s=self.spline_smoothing
-        )
-        
-        # Replace artifact segments with spline fit
-        corrected = data.copy()
-        corrected[artifact_indices] = spline(artifact_indices)
-        
-        if self.verbose:
-            print(f"  Spline corrected {len(artifact_indices)} artifact samples ({100*len(artifact_indices)/len(data):.1f}%)")
-        
-        return corrected
-    
-    def kalman_filter(self, data):
-        """
-        Kalman filtering for adaptive motion artifact attenuation
-        
-        The Kalman filter operates in two steps:
-        1. PREDICT: Use an AR model to predict the next state based on previous states
-        2. UPDATE: Combine prediction with new measurement, weighted by uncertainties
-        
-        This creates an optimal estimate that adapts to signal characteristics while
-        rejecting artifacts that don't match the expected dynamics.
-        
-        Mathematical basis:
-        - State vector: x[k] = [signal, signal_derivative, signal_derivative2, ...]
-        - Prediction: x[k|k-1] = A * x[k-1|k-1]
-        - Update: x[k|k] = x[k|k-1] + K * (measurement - H * x[k|k-1])
-        
-        Where K (Kalman gain) balances trust in prediction vs measurement based on
-        process noise (Q) and measurement noise (R).
-        """
-        n = len(data)
-        filtered = np.zeros(n)
-        
-        # For short segments, return original
-        if n < self.kalman_model_order + 5:
-            return data
-        
-        # Step 1: Fit AR model to initial clean segment
-        # We use the first 10 seconds of data to estimate signal dynamics
-        init_samples = min(int(10 * self.fs), n // 4)
-        
-        # Build AR model using Yule-Walker equations
-        from scipy.linalg import toeplitz
-        from scipy.signal import lfilter
-        
-        # Estimate autocorrelation
-        init_data = data[:init_samples]
-        acf = np.correlate(init_data - init_data.mean(), 
-                           init_data - init_data.mean(), 
-                           mode='full')
-        acf = acf[len(acf)//2:] / len(init_data)
-        
-        # Solve Yule-Walker for AR coefficients
-        if len(acf) > self.kalman_model_order:
-            R = toeplitz(acf[:self.kalman_model_order])
-            r = acf[1:self.kalman_model_order+1]
-            try:
-                ar_coeffs = np.linalg.solve(R, r)
-            except np.linalg.LinAlgError:
-                # Fallback to simple model if matrix is singular
-                ar_coeffs = np.zeros(self.kalman_model_order)
-                ar_coeffs[0] = 0.9
+            
+            # Store results
+            hbo_col = f'{location}_HbO'
+            hbr_col = f'{location}_HbR'
+            df[hbo_col] = hbo
+            df[hbr_col] = hbr
+            hbo_columns.append(hbo_col)
+            hbr_columns.append(hbr_col)
         else:
-            ar_coeffs = np.zeros(self.kalman_model_order)
-            ar_coeffs[0] = 0.9
-        
-        # Step 2: Build state-space matrices
-        # State vector includes current and previous values
-        dim = self.kalman_model_order
-        
-        # State transition matrix (A)
-        A = np.zeros((dim, dim))
-        A[0, :] = ar_coeffs
-        if dim > 1:
-            A[1:, :-1] = np.eye(dim-1)
-        
-        # Measurement matrix (H) - we observe the first state
-        H = np.zeros((1, dim))
-        H[0, 0] = 1.0
-        
-        # Noise covariances
-        Q = np.eye(dim) * self.kalman_Q  # Process noise
-        R = np.eye(1) * self.kalman_R     # Measurement noise
-        
-        # Step 3: Initialize Kalman filter
-        kf = KalmanFilter(dim_x=dim, dim_z=1)
-        kf.F = A
-        kf.H = H
-        kf.Q = Q
-        kf.R = R
-        kf.P = np.eye(dim) * self.kalman_P_init  # Initial state covariance
-        
-        # Initialize state with first samples
-        x_init = np.zeros(dim)
-        for i in range(min(dim, n)):
-            x_init[i] = data[i]
-        kf.x = x_init
-        
-        # Step 4: Run Kalman filter
-        for i in range(n):
-            # Predict
-            kf.predict()
-            
-            # Update (if we have a measurement)
-            kf.update(data[i])
-            
-            # Store filtered value (first state component)
-            filtered[i] = kf.x[0]
-        
-        if self.verbose:
-            # Calculate noise reduction
-            original_noise = np.std(data - filtered)
-            print(f"  Kalman: noise reduced by {100*(1 - original_noise/np.std(data)):.1f}%")
-        
-        return filtered
+            print(f"    WARNING: Missing channels for {location}")
+            if channel_730 not in df.columns:
+                print(f"      Missing: {channel_730}")
+            if channel_850 not in df.columns:
+                print(f"      Missing: {channel_850}")
     
-    def hybrid_motion_correction(self, data):
-        """
-        Apply all three motion correction methods in sequence
-        
-        Order matters:
-        1. Wavelet first: Removes sharp spikes and high-frequency artifacts
-        2. Spline second: Corrects any remaining baseline shifts
-        3. Kalman third: Smooths residual noise adaptively
-        """
-        if self.verbose:
-            print(f"\nApplying motion correction to channel...")
-        
-        # Step 1: Wavelet filtering
-        data_wavelet = self.wavelet_filter(data)
-        
-        # Step 2: Spline correction
-        data_spline = self.spline_correction(data_wavelet)
-        
-        # Step 3: Kalman filtering
-        data_kalman = self.kalman_filter(data_spline)
-        
-        return data_kalman
+    # OPTIONAL: If you want to also process the 4-channel mode data
+    # (for when you have 4-channel files)
+    if len(df.columns) == 4:  # 4-channel mode detection
+        print("  Detected 4-channel mode data")
+        four_channel_pairs = [
+            ('left', 'left_730', 'left_850'),
+            ('right', 'right_730', 'right_850'),
+        ]
+        # Add logic here if needed
     
-    def bandpass_filter(self, data):
-        """
-        Apply bandpass filter to OD data
-        """
-        nyquist = 0.5 * self.fs
-        
-        # Handle edge cases
-        low = self.lowcut / nyquist
-        high = self.highcut / nyquist
-        
-        if high >= 1.0:
-            high = 0.99
-            if self.verbose:
-                print(f"Warning: High cutoff adjusted to {high*nyquist:.2f} Hz")
-        
-        if low <= 0:
-            low = 0.001
-            if self.verbose:
-                print(f"Warning: Low cutoff adjusted to {low*nyquist:.2f} Hz")
-        
-        # Design and apply filter
-        b, a = butter(self.filter_order, [low, high], btype='band')
-        
-        # Use filtfilt for zero-phase distortion
-        if data.ndim == 1:
-            filtered = filtfilt(b, a, data)
-        else:
-            filtered = np.zeros_like(data)
-            for i in range(data.shape[1]):
-                filtered[:, i] = filtfilt(b, a, data[:, i])
-        
-        return filtered
-    
-    def od_conversion(self, raw_intensity):
-        """
-        Convert raw intensity to optical density
-        
-        OD = -log10(I / I0)
-        where I0 is baseline intensity (mean of first baseline_samples)
-        """
-        # Calculate baseline intensity
-        baseline_intensity = np.mean(raw_intensity[:self.baseline_samples], axis=0)
-        
-        # Avoid numerical issues
-        baseline_intensity = np.maximum(baseline_intensity, 1e-10)
-        raw_safe = np.maximum(raw_intensity, 1e-10)
-        
-        # Convert to OD
-        if raw_safe.ndim == 1:
-            od = -np.log10(raw_safe / np.mean(baseline_intensity))
-        else:
-            od = -np.log10(raw_safe / baseline_intensity[np.newaxis, :])
-        
-        return od
-    
-    def solve_two_wavelength(self, od_730, od_850):
-        """
-        Solve the two-wavelength system for HbO and HbR using Beer-Lambert law
-        
-        [ΔOD₇₃₀] = [ε_HbO₇₃₀  ε_HbR₇₃₀] · [ΔHbO] · d · DPF₇₃₀
-        [ΔOD₈₅₀]   [ε_HbO₈₅₀  ε_HbR₈₅₀]   [ΔHbR]    · d · DPF₈₅₀
-        
-        Returns:
-            dhbo: Change in oxygenated hemoglobin concentration (mM)
-            dhbr: Change in deoxygenated hemoglobin concentration (mM)
-        """
-        # Build extinction coefficient matrix
-        E = np.array([
-            [self.extinction[730]['HbO'], self.extinction[730]['HbR']],
-            [self.extinction[850]['HbO'], self.extinction[850]['HbR']]
-        ])
-        
-        # Pathlength factors (convert mm to cm)
-        d_cm = self.dist / 10  # mm to cm
-        L730 = d_cm * self.dpf[730]
-        L850 = d_cm * self.dpf[850]
-        
-        # Check if matrix is invertible
-        if np.linalg.cond(E) > 1000:
-            if self.verbose:
-                print("Warning: Extinction matrix is ill-conditioned")
-        
-        # Initialize output
-        n_samples = len(od_730)
-        dhbo = np.zeros(n_samples)
-        dhbr = np.zeros(n_samples)
-        
-        # Solve at each time point
-        for i in range(n_samples):
-            od_vec = np.array([od_730[i] / L730, od_850[i] / L850])
-            
-            try:
-                # Solve linear system: E * [HbO; HbR] = OD
-                conc = np.linalg.solve(E, od_vec)
-                dhbo[i] = conc[0]
-                dhbr[i] = conc[1]
-            except np.linalg.LinAlgError:
-                # If solving fails, use pseudoinverse
-                conc = np.linalg.pinv(E) @ od_vec
-                dhbo[i] = conc[0]
-                dhbr[i] = conc[1]
-        
-        return dhbo, dhbr
-    
-    def preprocess_pipeline(self, raw_df, impedance_df=None, channel_wavelengths=None):
-        """
-        Run full preprocessing pipeline
-        
-        Parameters:
-        -----------
-        raw_df : DataFrame
-            Raw intensity data (columns = channels, rows = timepoints)
-        impedance_df : DataFrame, optional
-            Impedance measurements per channel
-        channel_wavelengths : dict, optional
-            Mapping from channel names to wavelengths
-            e.g., {'ch1': 730, 'ch2': 730, 'ch3': 850, 'ch4': 850}
-            
-        Returns:
-        --------
-        results : dict
-            Contains processed HbO, HbR, and quality metrics
-        """
-        if self.verbose:
-            print("\n" + "="*60)
-            print("STARTING PREPROCESSING PIPELINE")
-            print("="*60)
-        
-        # Step 1: Quality check
-        good_channels = self.quality_check(raw_df, impedance_df)
-        
-        if not good_channels:
-            raise ValueError("No channels passed quality check")
-        
-        # Filter DataFrame to good channels
-        data_good = raw_df[good_channels].copy()
-        
-        if self.verbose:
-            print(f"\nStep 2: Motion artifact correction")
-        
-        # Step 2: Motion artifact attenuation (apply to each channel)
-        data_clean = pd.DataFrame(index=data_good.index, columns=data_good.columns)
-        for col in data_good.columns:
-            if self.verbose:
-                print(f"\nProcessing channel: {col}")
-            data_clean[col] = self.hybrid_motion_correction(data_good[col].values)
-        
-        # Step 3: Convert to OD
-        if self.verbose:
-            print(f"\nStep 3: Converting to Optical Density")
-        od_data = self.od_conversion(data_clean.values)
-        od_df = pd.DataFrame(od_data, columns=data_clean.columns, index=data_clean.index)
-        
-        # Step 4: Bandpass filter
-        if self.verbose:
-            print(f"\nStep 4: Bandpass filtering ({self.lowcut}-{self.highcut} Hz)")
-        od_filtered = self.bandpass_filter(od_df.values)
-        od_filtered_df = pd.DataFrame(od_filtered, columns=od_df.columns, index=od_df.index)
-        
-        # Step 5: Beer-Lambert to get HbO/HbR
-        if self.verbose:
-            print(f"\nStep 5: Converting to HbO/HbR using Beer-Lambert law")
-        
-        # Group channels by wavelength
-        if channel_wavelengths is None:
-            # Assume channels are named with wavelength
-            ch_730 = [c for c in good_channels if '730' in c or '760' in c]
-            ch_850 = [c for c in good_channels if '850' in c or '830' in c]
-        else:
-            ch_730 = [c for c in good_channels if channel_wavelengths.get(c) == 730]
-            ch_850 = [c for c in good_channels if channel_wavelengths.get(c) == 850]
-        
-        results = {
-            'raw_cleaned': data_clean,
-            'od_filtered': od_filtered_df,
-            'good_channels': good_channels,
-            'ch_730': ch_730,
-            'ch_850': ch_850,
-            'preprocessor': self
-        }
-        
-        # If we have both wavelengths, compute HbO/HbR
-        if ch_730 and ch_850:
-            # For simplicity, average channels of same wavelength
-            # You might want more sophisticated combination
-            od_730_mean = od_filtered_df[ch_730].mean(axis=1).values
-            od_850_mean = od_filtered_df[ch_850].mean(axis=1).values
-            
-            dhbo, dhbr = self.solve_two_wavelength(od_730_mean, od_850_mean)
-            
-            results['HbO'] = dhbo
-            results['HbR'] = dhbr
-            results['HbO_HbR_ratio'] = dhbo / (dhbo + dhbr + 1e-10)
-            
-            if self.verbose:
-                print(f"  Computed HbO/HbR from {len(ch_730)} 730nm and {len(ch_850)} 850nm channels")
-        
-        if self.verbose:
-            print("\n" + "="*60)
-            print("PREPROCESSING COMPLETE")
-            print("="*60 + "\n")
-        
-        return results
+    return df, hbo_columns, hbr_columns
 
+# ============================================================================
+# MAIN PIPELINE
+# ============================================================================
 
-    # results = pre.preprocess_pipeline(raw_data, impedance)
+def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(
+        description='Preprocess bladder volume NIRS data (16 or 4 channels)'
+    )
+    parser.add_argument('input_file', help='Input CSV file path')
+    parser.add_argument('--output-dir', default='Preprocessed_Data/', 
+                       help='Output directory (default: current directory)')
+    parser.add_argument('--sample-rate', type=float, 
+                       help='Override sample rate (Hz)')
     
-    print("\nScript ready. Uncomment and adapt the data loading lines above.")
+    args = parser.parse_args()
+    
+    # Initialize parameters
+    params = PreprocessingParams()
+    
+    # Override sample rate if provided
+    if args.sample_rate:
+        params.SAMPLE_RATE = args.sample_rate
+        print(f"Using sample rate: {params.SAMPLE_RATE} Hz")
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Load data
+    print("\n" + "="*60)
+    print("STEP 0: LOADING DATA")
+    print("="*60)
+    df, filename, timestamp_col, optical_cols, channel_count = load_and_validate_data(args.input_file)
+    
+    # Create output filename
+    output_file = os.path.join(args.output_dir, f"{filename}.cleaned.csv")
+    
+    # STEP 1: Channel intensity filtering
+    print("\n" + "="*60)
+    print("STEP 1: CHANNEL INTENSITY FILTERING")
+    print("="*60)
+    df_filtered, kept_channels, removed_channels = channel_intensity_filtering(
+        df, optical_cols, params
+    )
+    
+    # STEP 2: Motion artifact attenuation
+    print("\n" + "="*60)
+    print("STEP 2: MOTION ARTIFACT ATTENUATION")
+    print("  - Wavelet filtering")
+    print("  - Spline baseline correction")
+    print("  - Kalman filtering")
+    print("="*60)
+    df_motion_corrected = motion_artifact_attenuation(df_filtered, kept_channels, params)
+    
+    # STEP 3: Convert to Optical Density
+    print("\n" + "="*60)
+    print("STEP 3: CONVERT TO OPTICAL DENSITY")
+    print("="*60)
+    df_od = convert_to_optical_density(df_motion_corrected, kept_channels, params)
+    
+    # STEP 4: Bandpass filtering
+    print("\n" + "="*60)
+    print("STEP 4: BANDPASS FILTERING")
+    print(f"  - Highpass cutoff: {params.HIGHPASS_CUTOFF} Hz")
+    print(f"  - Lowpass cutoff: {params.LOWPASS_CUTOFF} Hz")
+    print("="*60)
+    df_bandpass = apply_bandpass_filtering(df_od, kept_channels, params)
+    
+    # STEP 5: Beer-Lambert conversion
+    print("\n" + "="*60)
+    print("STEP 5: BEER-LAMBERT CONVERSION (HbO/HbR)")
+    print("="*60)
+    df_final, hbo_cols, hbr_cols = process_beer_lambert(df_bandpass, kept_channels, params)
+    
+    # Ensure timestamp column is preserved
+    df_final[timestamp_col] = df[timestamp_col].values
+    
+    # Save results
+    print("\n" + "="*60)
+    print("SAVING RESULTS")
+    print("="*60)
+    df_final.to_csv(output_file, index=False)
+    print(f"Saved cleaned data to: {output_file}")
+    print(f"  - {len(kept_channels)} optical channels")
+    print(f"  - {len(hbo_cols)} HbO channels")
+    print(f"  - {len(hbr_cols)} HbR channels")
+    print(f"  - Total columns: {len(df_final.columns)}")
+    
+    # Summary statistics
+    print("\n" + "="*60)
+    print("PROCESSING SUMMARY")
+    print("="*60)
+    print(f"Input: {args.input_file}")
+    print(f"Output: {output_file}")
+    print(f"Channels processed: {len(kept_channels)}")
+    print(f"Channels removed: {len(removed_channels)}")
+    
+    if len(hbo_cols) > 0:
+        print("\nHbO Statistics (first channel):")
+        print(f"  Mean: {df_final[hbo_cols[0]].mean():.4f}")
+        print(f"  Std: {df_final[hbo_cols[0]].std():.4f}")
+        print(f"  Range: [{df_final[hbo_cols[0]].min():.4f}, {df_final[hbo_cols[0]].max():.4f}]")
+    
+    print("\n" + "="*60)
+    print("PIPELINE COMPLETE")
+    print("="*60)
+
+if __name__ == "__main__":
+    main()
