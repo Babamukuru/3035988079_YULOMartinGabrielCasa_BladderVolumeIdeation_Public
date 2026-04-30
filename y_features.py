@@ -31,12 +31,19 @@ def compute_fNIRS_derived_metrics(df):
     df = df.copy()
     
     # Define channel pairs
-    channels = [
+    channels = []
+    possible_channels = [
         ('left_outer', 'left_outer_HbO_value', 'left_outer_HbR_value'),
         ('right_outer', 'right_outer_HbO_value', 'right_outer_HbR_value'),
         ('left_inner', 'left_inner_HbO_value', 'left_inner_HbR_value'),
         ('right_inner', 'right_inner_HbO_value', 'right_inner_HbR_value')
     ]
+    for prefix, hbo_col, hbr_col in possible_channels:
+        if hbo_col in df.columns and hbr_col in df.columns:
+            channels.append((prefix, hbo_col, hbr_col))
+    
+    if not channels:
+        raise ValueError("No valid channel columns found in dataframe")
     
     for prefix, hbo_col, hbr_col in channels:
         # Tissue Oxygenation Index (TOI) - percentage
@@ -55,31 +62,52 @@ def compute_fNIRS_derived_metrics(df):
     if 'wavelength_ratio_inner' in df.columns:
         df['wavelength_ratio_inner_norm'] = df['wavelength_ratio_inner'] / df['wavelength_ratio_inner'].mean()
     
-    # Composite indices (averaged across channels for stability)
-    df['TOI_mean'] = df[[f'{p}_TOI' for p, _, _ in channels]].mean(axis=1)
-    df['BVI_mean'] = df[[f'{p}_BVI' for p, _, _ in channels]].mean(axis=1)
-    df['OEF_proxy_mean'] = df[[f'{p}_OEF_proxy' for p, _, _ in channels]].mean(axis=1)
+    # --- DYNAMIC COMPOSITE INDICES ---
+    toi_cols = [f'{p}_TOI' for p, _, _ in channels]
+    bvi_cols = [f'{p}_BVI' for p, _, _ in channels]
+    oef_cols = [f'{p}_OEF_proxy' for p, _, _ in channels]
     
-    # Asymmetry indices (left vs right)
-    df['TOI_asymmetry'] = (df['left_outer_TOI'] + df['left_inner_TOI'])/2 - \
-                           (df['right_outer_TOI'] + df['right_inner_TOI'])/2
-    df['BVI_asymmetry'] = (df['left_outer_BVI'] + df['left_inner_BVI'])/2 - \
-                           (df['right_outer_BVI'] + df['right_inner_BVI'])/2
+    df['TOI_mean'] = df[toi_cols].mean(axis=1)
+    df['BVI_mean'] = df[bvi_cols].mean(axis=1)
+    df['OEF_proxy_mean'] = df[oef_cols].mean(axis=1)
     
-    # Inner-outer gradients
-    df['TOI_gradient'] = (df['left_outer_TOI'] + df['right_outer_TOI'])/2 - \
-                          (df['left_inner_TOI'] + df['right_inner_TOI'])/2
-    df['BVI_gradient'] = (df['left_outer_BVI'] + df['right_outer_BVI'])/2 - \
-                          (df['left_inner_BVI'] + df['right_inner_BVI'])/2
+    # --- DYNAMIC ASYMMETRY ---
+    # Separate outer and inner channels based on what's available
+    outer_prefixes = [p for p, _, _ in channels if 'outer' in p]
+    inner_prefixes = [p for p, _, _ in channels if 'inner' in p]
+    left_prefixes = [p for p, _, _ in channels if 'left' in p]
+    right_prefixes = [p for p, _, _ in channels if 'right' in p]
     
-    return df
+    # TOI asymmetry (only if we have both left and right)
+    if left_prefixes and right_prefixes:
+        left_toi = df[[f'{p}_TOI' for p in left_prefixes]].mean(axis=1)
+        right_toi = df[[f'{p}_TOI' for p in right_prefixes]].mean(axis=1)
+        df['TOI_asymmetry'] = left_toi - right_toi
+    
+    if left_prefixes and right_prefixes:
+        left_bvi = df[[f'{p}_BVI' for p in left_prefixes]].mean(axis=1)
+        right_bvi = df[[f'{p}_BVI' for p in right_prefixes]].mean(axis=1)
+        df['BVI_asymmetry'] = left_bvi - right_bvi
+    
+    # Inner-outer gradients (only if we have both)
+    if outer_prefixes and inner_prefixes:
+        outer_toi = df[[f'{p}_TOI' for p in outer_prefixes]].mean(axis=1)
+        inner_toi = df[[f'{p}_TOI' for p in inner_prefixes]].mean(axis=1)
+        df['TOI_gradient'] = outer_toi - inner_toi
+    
+    if outer_prefixes and inner_prefixes:
+        outer_bvi = df[[f'{p}_BVI' for p in outer_prefixes]].mean(axis=1)
+        inner_bvi = df[[f'{p}_BVI' for p in inner_prefixes]].mean(axis=1)
+        df['BVI_gradient'] = outer_bvi - inner_bvi
+    
+    return df, channels
 
 
 # ============================================================================
 # PART 2: COMPUTE RATES OF CHANGE
 # ============================================================================
 
-def compute_rates_of_change(df, metrics=None, smooth_window=5):
+def compute_rates_of_change(df, channels, metrics=None, smooth_window=5):
     """
     Compute rate of change (first derivative) for specified metrics.
     Optionally apply Savitzky-Golay smoothing first for noisy signals.
@@ -97,9 +125,16 @@ def compute_rates_of_change(df, metrics=None, smooth_window=5):
     df = df.copy()
     
     if metrics is None:
-        metrics = ['TOI_mean', 'BVI_mean', 'OEF_proxy_mean', 
-                   'TOI_asymmetry', 'BVI_asymmetry',
-                   'left_outer_TOI', 'right_outer_TOI']
+        metrics = ['TOI_mean', 'BVI_mean', 'OEF_proxy_mean']
+        # Add metrics that actually exist
+        for extra in ['TOI_asymmetry', 'BVI_asymmetry']:
+            if extra in df.columns:
+                metrics.append(extra)
+        for p, _, _ in channels:
+            for suffix in ['_TOI']:  # add more if needed
+                col = f'{p}{suffix}'
+                if col in df.columns:
+                    metrics.append(col)
     
     for metric in metrics:
         if metric in df.columns:
@@ -222,6 +257,36 @@ def compute_bladder_filling_index(df, pre_wear_volume=None, post_wear_volume=Non
     formula = "Filling Index = 0.25*TOI_norm + 0.20*BVI_norm + 0.20*OEF_norm + 0.20*Asymmetry_norm + 0.15*dTOI_norm"
     
     return df, formula
+
+def add_elapsed_time_feature(df, time_col='prediction_time_sec'):
+    """
+    Add elapsed time in seconds from session start.
+    This is the single most predictive feature from Fechner et al. (2023).
+    
+    If you have a real timestamp column, uses that.
+    If not, uses index assuming approximately regular sampling.
+    """
+    if time_col in df.columns:
+        # Convert to datetime if needed
+        if not pd.api.types.is_datetime64_any_dtype(df[time_col]):
+            df['timestamp_dt'] = pd.to_datetime(df[time_col])
+        else:
+            df['timestamp_dt'] = df[time_col]
+        
+        df['elapsed_time_sec'] = (df['timestamp_dt'] - df['timestamp_dt'].iloc[0]).dt.total_seconds()
+    else:
+        # Fallback: assume index represents sequential samples
+        # Estimate sampling rate from your data
+        print("Warning: No timestamp column found. Using row index as proxy for time.")
+        print("This is NOT ideal — elapsed time should be real seconds.")
+        # If you know your approximate sampling rate (e.g., 10 Hz), use that
+        estimated_sampling_rate_hz = 10  # adjust this based on your device
+        df['elapsed_time_sec'] = df.index / estimated_sampling_rate_hz
+    
+    # Also compute elapsed time in minutes for plotting
+    df['elapsed_time_min'] = df['elapsed_time_sec'] / 60
+    
+    return df
 
 
 # ============================================================================
@@ -420,12 +485,14 @@ def process_fNIRS_session(df, pre_wear_volume=None, post_wear_volume=None,
     print(f"\n{'='*60}")
     print(f"Processing: {session_name}")
     print(f"{'='*60}")
+
+    df_processed = add_elapsed_time_feature(df, time_col='prediction_time_sec')
     
     # Step 1: Compute derived metrics
-    df_processed = compute_fNIRS_derived_metrics(df)
+    df_processed, channelsXD = compute_fNIRS_derived_metrics(df)
     
     # Step 2: Compute rates of change
-    df_processed = compute_rates_of_change(df_processed, smooth_window=smooth_window)
+    df_processed = compute_rates_of_change(df_processed,channelsXD, smooth_window=smooth_window)
     
     # Step 3: Compute Bladder Filling Index
     df_processed, formula = compute_bladder_filling_index(
@@ -440,6 +507,7 @@ def process_fNIRS_session(df, pre_wear_volume=None, post_wear_volume=None,
     summary_stats = {
         'session': session_name,
         'n_samples': len(df_processed),
+        'duration_sec': df_processed['elapsed_time_sec'].max() if 'elapsed_time_sec' in df_processed.columns else None,
         'pre_volume_mL': pre_wear_volume,
         'post_volume_mL': post_wear_volume,
         'volume_change_mL': post_wear_volume - pre_wear_volume if (pre_wear_volume and post_wear_volume) else None,
@@ -576,8 +644,8 @@ def main():
         # Process the example data
     df_processed, summary = process_fNIRS_session(
         df,
-        pre_wear_volume=33.8688,   # Example: 100 mL at start
-        post_wear_volume=124.60032,  # Example: 250 mL at end (150 mL filling)
+        pre_wear_volume=None,   # Example: 100 mL at start
+        post_wear_volume=None,  # Example: 250 mL at end (150 mL filling)
         session_name="Example_Session"
     )
 
@@ -596,8 +664,8 @@ def main():
 )
     fig2 = plot_correlation_with_volume(
         df_processed, 
-        pre_vol=100, 
-        post_vol=250,
+        pre_vol=33.8688, 
+        post_vol=124.60032,
         save_path=plot2_path
 )
     
