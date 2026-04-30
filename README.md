@@ -135,6 +135,9 @@ A heuristic quality-check function that flags windows likely corrupted by motion
 
 main() is the orchestrator that loads the feature CSV, creates the output directory, and sequentially generates all five plot types. It automatically selects the top three features by variance for individual time-series plots.
 
+FeatureSelector3.py, which accepts the same type of input with same requirements, additionally generates the following graphs, and has the following functions:
+
+
 ///// #5 ///////
 y_features.py
 This script derives physiologically meaningful target variables from the cleaned NIRS features, creating a continuous "Bladder Filling Index" that can serve as a regression target for machine learning models. It synthesizes tissue oxygenation, blood volume, and spatial asymmetry into a normalized [0,1] score and optionally maps it to estimated milliliter volumes.
@@ -192,16 +195,166 @@ main() parses command-line arguments, loads the feature CSV, runs process_fNIRS_
 
 ///// #6 ///////
 MLmodel.py
+To train and rigorously evaluate machine learning models (Random Forest and LSTM) for predicting continuous bladder volume from the derived NIRS features. The script implements leave-one-session-out cross-validation, feature selection, downsampling for efficiency, and comprehensive evaluation metrics including regression errors, classification accuracy, confusion matrices, and ROC curves. It saves trained models for deployment.
+
+required input (automatically handled by main.sh:)
+Four CSV files from y_features.py processing (sessions 1-4), each containing the derived physiological metrics, filling indices, and elapsed time features.
+Ten positional command-line arguments: four CSV paths and six bladder volume measurements (mL) representing pre- and post-void volumes for each session plus a post-void residual (PVR).
+
+Functions within:
+Argument Parsing and Session Configuration
+parse_args():
+Defines and parses the fixed-order positional arguments: four CSV file paths, six volume measurements (bv1, bv3, bv4, bv5, bv6, bv_pvr), and optional flags for patient ID, output directory, downsampling factor, and maximum features.
+
+parse_vol(val):
+Safely parses volume arguments, returning None for "NA", empty, or invalid values. This allows flexible session inclusion—sessions with missing volumes are automatically skipped.
+
+build_session_list(args):
+Constructs a list of valid (session_name, csv_path, pre_volume, post_volume) tuples from the arguments. Session 1 uses PVR (if available) as pre-volume; subsequent sessions chain their volumes (session N's post-volume becomes session N+1's pre-volume). Sessions with missing data are silently excluded.
+
+Data Loading and Feature Engineering
+load_sessions(session_list):
+Loads each CSV, validates it's non-empty, and returns parallel lists of session names, DataFrames, and (pre_vol, post_vol) tuples. Prints a summary of each loaded session.
+
+get_features(df):
+Dynamically identifies which feature columns from the master list (CORE_FEATURES, CHANNEL_FEATURES, TIME_FEATURES, WAVELENGTH_FEATURES) are actually present and non-null in the DataFrame. This provides robustness to variations in upstream processing outputs.
+
+add_labels(df, pre, post):
+Creates the regression target column label_volume_mL by linearly interpolating between the known pre-session and post-session volumes across all rows. This assumes a constant filling rate, providing continuous supervision for each time point.
+
+Efficiency Optimizations
+downsample_df(df, factor):
+Reduces dataset size by keeping every Nth row (default factor=100). This is critical because the high-overlap windowing from TemporalOverlap.py creates massive temporal redundancy—adjacent rows are nearly identical. Downsampling preserves the volume trajectory while dramatically reducing training time and overfitting risk for tree-based models.
+
+select_features(X, y, all_features, max_features):
+Uses a lightweight Random Forest (50 trees, max depth 10) to rank all available features by importance. Selects the top max_features (default 40) for the final model. This removes correlated/redundant features that can cause overfitting and slows training. Returns both the selected feature list and a full importance DataFrame for inspection.
+
+2 main models were done: A standard RandomForest Regressor, and a Keras Sequential LSTM following the Fechner paper.
+Model Classes (Object-Oriented Wrappers)
+RFModel: Wraps scikit-learn's RandomForestRegressor (200 trees, max depth 15, min samples leaf 5) with standardization. Provides consistent fit(), predict(), and save() interfaces matching the LSTM wrapper, enabling interchangeable use in the cross-validation loop.
+
+LSTMModel:  Wraps a Keras Sequential LSTM network with architecture: LSTM(64) → Dropout(0.2) → LSTM(32) → Dropout(0.2) → Dense(16) → Dense(1). Includes separate scalers for features and targets. The _sequences() method creates sliding windows of length 60 for temporal context. Falls back gracefully (returning NaN predictions) if insufficient data for sequence creation.
+
+Cross-Validation and Evaluation
+build_train_data(indices, session_dfs, session_volumes, downsample, selected_features):
+Combines multiple sessions into a single training array. Applies downsampling, labels creation, and feature selection. Returns stacked feature matrix X, target vector y, and the list of feature names actually used.
+
+run_cv(model_class, model_name, names, dfs, vols, downsample, selected_features, **kw):
+Implements leave-one-session-out cross-validation. For each fold, trains on all sessions except one, then predicts on the held-out session. Applies consistent downsampling and feature selection to both train and test sets. Returns a list of DataFrames with predictions, ground truth, and metadata.
+
+classify_volume(vol, thresholds): Discretizes continuous volume predictions into three clinical categories: "low" (<100 mL), "moderate" (100-300 mL), or "high" (>300 mL). This enables classification evaluation alongside regression metrics.
+
+evaluate_model(predictions, model_name, pid, thresholds): Does the following evaluation metrics
+Extracts endpoint predictions (first and last row of each session).
+Regression metrics: MAE, RMSE, and R² for start, end, and combined volumes.
+Classification metrics: Accuracy, weighted precision/recall/F1, and confusion matrix for low/moderate/high categories.
+ROC analysis: Binary "high vs. not-high" ROC curve with AUC.
+Visualization: Saves confusion matrix heatmap and ROC curve plots.
+Trace R²: Compares the full prediction trajectory against a linear ramp between pre and post volumes, revealing whether the model learned anything beyond the baseline interpolation.
+
+main():
+Parses arguments and builds session list.
+Creates an initial combined dataset from all sessions with downsampling.
+Performs feature selection, saving importance rankings.
+Rebuilds dataset with selected features.
+Trains final Random Forest on all data, performs sanity check (training MAE), and saves model artifacts (model pickle, scaler pickle, feature list CSV).
+Runs leave-one-out CV for Random Forest with full evaluation.
+Optionally trains and evaluates LSTM (using less aggressive downsampling since LSTMs benefit from more data), saving the Keras model.
 
 ///// #7 ///////
 ScikitModel.py
+A refactored, more rigorous implementation of MLModel2.py using scikit-learn's Pipeline API to prevent data leakage during feature selection and preprocessing. This version ensures that all transformations (imputation, scaling, feature selection) are fit only on training data within each cross-validation fold, then applied to held-out test data—a critical best practice that MLModel2.py's manual approach potentially violated. It also adds comprehensive result saving (predicted vs. actual bar charts, volume tables, metrics files) for production-grade reporting.
+
+Follows a modified version of a ScikitLearn pipeline to extract relevant features and train a Random Forest model to estimate bladder volume.
+
+Comparison with MLModel2.py
+MLModel2.py performed feature selection once on all data before cross-validation—a subtle form of data leakage where test fold information could influence which features are selected. ScikitModel.py embeds feature selection inside the Pipeline, ensuring it's re-fit on each training fold independently during cross-validation.
+
+Same input requirements as MLModel2.py, again automatically handled by main.sh
+
+Functions within:
+Argument Parsing and Data Loading (Similar to MLModel2.py)
+parse_args(), parse_vol(val), build_session_list(args):
+
+Identical in function to MLModel2.py—parse command-line arguments, handle missing volumes, and build the session list from the fixed-order positional arguments.
+
+load_and_prepare_data(session_list):
+
+Purpose: Loads and prepares all session data into a unified format for scikit-learn. Key differences from MLModel2.py:
+
+Automatic feature detection: Dynamically identifies all numeric feature columns by excluding known non-feature columns (window_id, prediction_time_sec, target-derived columns like Bladder_Filling_Index, TOI_norm, etc.).
+
+Forward/backward fill: Handles NaN values with forward-fill then backward-fill before any rows are dropped, minimizing data loss.
+
+Group array: Creates a groups array where each row is labeled by its session index, essential for LeaveOneGroupOut cross-validation.
+
+Session info tracking: Returns a list of dictionaries with per-session metadata (name, row count, pre/post volumes) used throughout evaluation.
+
+Pipeline Construction
+build_pipeline(n_features, max_features=40): Constructs a scikit-learn Pipeline with four sequential steps:
+
+SimpleImputer: Fills any remaining NaN values with column means (safety net after forward/backward fill).
+StandardScaler: Standardizes features to zero mean, unit variance—critical for models sensitive to feature scales.
+SelectFromModel: Embedded feature selection using a lightweight Random Forest (100 trees, max depth 10). This fits on training data only, then transforms test data to keep only the most important features. The max_features parameter caps the number retained.
+RandomForestRegressor: The final prediction model (200 trees, max depth 15, min samples leaf 5).
+Data Leakage Prevention: Because feature selection is inside the pipeline, when cross_val_predict or LeaveOneGroupOut is used, the selector is re-fit on each training fold—test data never influences which features are chosen.
+
+Cross-Validation
+run_loso_cv(pipeline, X, y, groups, session_info): Performs strict leave-one-session-out cross-validation. For each fold, trains the entire pipeline (including feature selection) on all but one session, then predicts on the held-out session. Prints per-fold MAE and R² for immediate feedback.
+
+run_train_test_split(pipeline, X, y, groups, session_info, test_size=0.2):
+Alternative simpler 80/20 train-test split that respects session boundaries (sessions are kept intact, not split across train/test). Currently used as the primary evaluation method in main().
+
+Evaluation and Reporting (Enhanced vs. MLModel2.py)
+classify_volume(vol, thresholds):
+Same as MLModel2.py—discretizes continuous volume into low/moderate/high categories for classification metrics.
+
+evaluate_results(y_true, y_pred, session_info, model_name, pid):
+Comprehensive evaluation that writes all results to both console and a timestamped metrics file. Includes:
+
+Regression: MAE, RMSE, R² on all valid predictions.
+Per-session endpoint errors: Start and end volume errors for each session, saved as CSV.
+Classification: Accuracy, weighted precision/recall/F1, confusion matrix (saved as PNG), and ROC curve for "high vs. not-high" classification (saved as PNG).
+
+Also calls plot_predicted_vs_actual() and save_volume_table() for additional outputs.
+plot_predicted_vs_actual(session_info, y_true, y_pred, output_dir, model_name, pid):
+
+Creates a side-by-side bar chart comparing predicted vs. actual bladder volumes for pre (start) and post (end) values across all sessions. Blue bars = actual, red bars = predicted. This provides an intuitive visual assessment of model performance per session.
+
+save_volume_table(session_info, y_true, y_pred, output_dir, model_name, pid):
+Generates a detailed CSV table with per-session actual vs. predicted volumes, errors, and volume changes. Also prints a formatted table to console. This is essential for clinical reporting and error analysis.
+
+Main Pipeline
+main():
+
+The production training pipeline:
+
+Loads and prepares data from all valid sessions.
+Builds the scikit-learn pipeline with embedded feature selection.
+Performs train-test split evaluation (with session boundary respect) and runs full evaluate_results.
+Trains the final pipeline on all data for deployment.
+Reports which features were selected by the final model and saves the list.
+Serializes the complete pipeline as a single .pkl file using joblib.dump, enabling simple deployment with joblib.load() and pipeline.predict(new_data).
+
+These aforementioned two model scripts trains a model on a class-by-class basis (in this case, calibrated and trained on an individuals patients data. A benefit is that it is trained for the specific biophyisical differences and data variances for this patient, but a drawback is there is less data to use.
+
+///// #8 ///////
+FeatureSelectorBig.py
 
 
 
+//// #9 /////
+ScikitModelBig.py
+
+A modified version of ScikitModel.py that is applied to all accumulated data, in order to have a model with more training data available, at the cost of more generalization that isn't calibrated to the individual participants body type and biophysical factors.
+
+The workflow and functions were generally the same, although the input is quite different:
+Main.sh automatically adds all csvs and mapped validated Ultrasound bladder before and after volumes, as well as pvr volumes, per patient and stores it into CONFIG_CSV, which is then accessed and read by ScikitModelBig to know the bladder volume values and the names and locations of the feature-extracted csv files.
 
 
+////////////////
 
-OTHER FILES not incorporated into main,sh:
+OTHER FILES not incorporated into main.sh:
 
 fyp_csv_viewer.Rmd:
 Viewing csv files manually via excel or textedit was too time and resource intensive and quite inefficient, so i wrote a simple R-script to help me fiddle with csv files and inspect their file sizes, row or column counts, colnames, etc. 
