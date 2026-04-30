@@ -6,6 +6,9 @@ Usage: The entire pipeline is built that users only need to run main.sh. It will
 Requirements: 
 Code requires up-to-date python and R. List of necessary packages for each script are also listed at the top of the respective scripts, and are additionally listed below. For the code to also function properly, it requires a master metadata file that maps each raw sensor data with the appropriate before and after ultrasound-measured bladder volume based on their timestamp and file name. The file in question would also contain patient metadata and maps each patient with their respective raw sensor data csv files, raw bladder volume images, and timestamp and data collection period (E.g., if this was the first, second, third, or fourth wear and data measurement of the sensor).
 
+Data is found in this google drive: https://drive.google.com/drive/folders/1aj9TIMCgy5Rh0zogOe_rCxWE9lY_HYnP?usp=sharing
+Please download it and move the data into the same folder as the github repo (same folder as main.sh)
+
 Workflow of main.sh:
 
 ///// #1 ///////
@@ -341,6 +344,9 @@ These aforementioned two model scripts trains a model on a class-by-class basis 
 ///// #8 ///////
 FeatureSelectorBig.py
 
+A modified version of FeatureSelector that performs feature selection and visualization based on all 4 csvs, aimed to illustrate the difference between sessions.
+
+The workflow and functions were generally the same, although the input is quite different:
 
 
 //// #9 /////
@@ -360,6 +366,9 @@ fyp_csv_viewer.Rmd:
 Viewing csv files manually via excel or textedit was too time and resource intensive and quite inefficient, so i wrote a simple R-script to help me fiddle with csv files and inspect their file sizes, row or column counts, colnames, etc. 
 
 This is merely for troubleshooting and assistance, and is not required for the main pipeline.
+
+BladderDicomViewer.py
+A dictionary within the file entails all the relevant dicom files that are used. This script displays them all side-by-side for easier viewing and double-checking of all the images to check their quality and to measure the bladder volume.
 
 Ultrasound_validation2.Rmd:
 This script takes in input of Depth, Height and Width of bladder volume images, manually measured and filled in a spreadsheet. It then calculates the bladder volume based on formula D*H*W*0.7, and appends this information to the resultant csv file. Additionally, it can filter out images labelled "0" as NA or "1" as poor quality, though doing so reduces the number of viable data as files would not have respective ground truth.
